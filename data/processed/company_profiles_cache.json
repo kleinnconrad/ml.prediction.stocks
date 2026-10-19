@@ -15,6 +15,10 @@
     "full_name": "ASTA ENERGY SOLUTIONS AG",
     "description": "ASTA ENERGY SOLUTIONS AG is a German company focused on providing innovative energy solutions."
   },
+  "1COV.DE": {
+    "full_name": "COVESTRO AG  O.N.",
+    "description": "Covestro AG is a German company that manufactures and supplies high-tech polymer materials and their components for various industries worldwide."
+  },
   "1GBS.DE": {
     "full_name": "GBS SOFTWARE AG INH O.N.",
     "description": "GBS Software AG is a German software company that develops and distributes digital workplace solutions, including enterprise content management, email management, and workflow automation."
@@ -370,6 +374,10 @@
   "CYR.DE": {
     "full_name": "CYAN AG  INH O.N.",
     "description": "CYAN AG is a German technology company specializing in providing innovative cybersecurity solutions, including mobile security and digital payment protection."
+  },
+  "D6H0.DE": {
+    "full_name": "DATAGROUP SE NA. O.N.",
+    "description": "DATAGROUP SE is a German IT service company that provides a comprehensive portfolio of IT solutions and services to medium-sized and large enterprises."
   },
   "D77.DE": {
     "full_name": "DN GROUP AG NA O.N.",
