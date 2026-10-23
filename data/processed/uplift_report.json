@@ -1,29 +1,29 @@
 {
   "1m": {
     "metrics": {
-      "baseline": -0.02199561809371749,
-      "UP_FINAL_BUY": -0.006145565324055147,
-      "UP": -0.035705244584347394,
-      "NOT_UP": -0.02002475911744659
+      "baseline": -0.006637368931741301,
+      "UP_FINAL_BUY": 0.023513754501663587,
+      "UP": -0.021963560922059117,
+      "NOT_UP": -0.006165105580207828
     },
     "counts": {
       "baseline": 216,
-      "UP_FINAL_BUY": 10,
-      "UP": 36,
-      "NOT_UP": 170
+      "UP_FINAL_BUY": 12,
+      "UP": 29,
+      "NOT_UP": 175
     },
     "min_price_eur": 10.0,
     "excluded_below_min_price": 157,
-    "date": "2026-09-22T11:37:55.722476Z",
-    "report_date": "2026-09-22",
+    "date": "2026-09-23T10:25:49.389779Z",
+    "report_date": "2026-09-23",
     "is_dummy": false
   },
   "3m": {
     "metrics": {
-      "baseline": -0.018870534695090944,
-      "UP_FINAL_BUY": 0.0755801247720622,
-      "UP": -0.06636784962194911,
-      "NOT_UP": -0.015142807891850052
+      "baseline": -0.00918342102251706,
+      "UP_FINAL_BUY": 0.08096555095138265,
+      "UP": -0.05605415643630871,
+      "NOT_UP": -0.0054093792291369765
     },
     "counts": {
       "baseline": 225,
@@ -32,7 +32,7 @@
       "NOT_UP": 192
     },
     "min_price_eur": 10.0,
-    "excluded_below_min_price": 154,
+    "excluded_below_min_price": 153,
     "date": "2026-07-24T07:07:38.555180Z",
     "report_date": "2026-07-24",
     "is_dummy": false
