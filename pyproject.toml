@@ -16,14 +16,14 @@ dependencies = [
     "seaborn==0.13.2",
     "scipy==1.18.1",
     "python-dotenv==1.2.4",
-    "google-genai==2.29.0",
-    "pydantic==2.14.0",
+    "google-genai==2.31.0",
+    "pydantic==2.14.1",
 ]
 
 [dependency-groups]
 dev = [
     "pytest==9.1.1",
-    "ruff==0.17.0",
+    "ruff==0.17.1",
 ]
 
 [tool.pytest.ini_options]
