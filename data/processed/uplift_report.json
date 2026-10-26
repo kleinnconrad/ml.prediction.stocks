@@ -20,21 +20,21 @@
   },
   "3m": {
     "metrics": {
-      "baseline": -0.025100534509647617,
-      "UP_FINAL_BUY": 0.09872846457556184,
-      "UP": -0.07237779286949343,
-      "NOT_UP": -0.02129798155101988
+      "baseline": -0.02872234236607615,
+      "UP_FINAL_BUY": 0.08622456531255289,
+      "UP": -0.04759944246364399,
+      "NOT_UP": -0.028965372553766917
     },
     "counts": {
       "baseline": 223,
-      "UP_FINAL_BUY": 4,
-      "UP": 26,
-      "NOT_UP": 193
+      "UP_FINAL_BUY": 5,
+      "UP": 28,
+      "NOT_UP": 190
     },
     "min_price_eur": 10.0,
     "excluded_below_min_price": 153,
-    "date": "2026-07-27T10:46:56.438275Z",
-    "report_date": "2026-07-27",
+    "date": "2026-07-28T08:01:08.241519Z",
+    "report_date": "2026-07-28",
     "is_dummy": false
   }
 }
