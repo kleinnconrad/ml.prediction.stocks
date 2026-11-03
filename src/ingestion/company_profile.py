@@ -40,11 +40,16 @@ def save_cache(cache: dict):
     except Exception as e:
         logger.error(f"Failed to save company profile cache: {e}")
 
-def fetch_company_profile(ticker: str, company_name: str) -> dict:
+def fetch_company_profile(ticker: str, company_name: str, model: str) -> dict:
     """
-    Fetches a brief description using Gemini 2.5 Flash given the ticker and known company name.
+    Fetches a brief description using Gemini given the ticker and known company name.
     Utilizes a local cache to avoid redundant API calls.
-    
+
+    Args:
+        ticker (str): Ticker symbol.
+        company_name (str): Known company name.
+        model (str): Gemini model id (`gemini_model` in config/settings.yaml).
+
     Returns:
         dict: {"full_name": str, "description": str}
     """
@@ -63,7 +68,7 @@ def fetch_company_profile(ticker: str, company_name: str) -> dict:
         prompt = f"Provide a 1-sentence brief description for the German stock '{company_name}' (Ticker symbol '{ticker}')."
         
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model=model,
             contents=prompt,
             config={
                 'response_mime_type': 'application/json',

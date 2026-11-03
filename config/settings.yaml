@@ -34,4 +34,7 @@ history_retention_days: 200       # archived daily reports kept; must exceed the
 uplift_match_tolerance_days: 15   # max distance between the 1/3/6-month lookback date and an archived report
 min_price_eur: 10                 # stocks at or below this price are excluded from the uplift evaluation and hidden on the dashboard
 
+# Company profiles
+gemini_model: "gemini-3.5-flash-lite"   # model of the one-sentence company descriptions (src/ingestion/company_profile.py)
+
 xetra_t7_url: "https://www.cashmarket.deutsche-boerse.com/resource/blob/1528/6249e15bf93885fd91bd411663a0ff82/data/t7-xetr-allTradableInstruments.csv"

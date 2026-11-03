@@ -96,7 +96,7 @@ def run_step1_for_ticker(ticker: str, company_name: str, macro_df: pd.DataFrame,
     feature_diagnostics = metrics.pop('feature_diagnostics', {})
 
     latest_price = float(merged_df['Close'].iloc[-1]) if 'Close' in merged_df.columns else None
-    profile = fetch_company_profile(ticker, company_name)
+    profile = fetch_company_profile(ticker, company_name, str(settings['gemini_model']))
 
     payload = {
         "stock_name": ticker,

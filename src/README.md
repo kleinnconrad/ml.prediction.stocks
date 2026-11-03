@@ -70,7 +70,7 @@ Responsible for extracting data from external APIs (Yahoo Finance, FRED, Xetra, 
 * **`global_macro.py`**: Fetches the macro universe (Yahoo Finance tickers and FRED series defined in `config/universe.py`). FRED series are fetched one by one, discontinued series are dropped, and every series is shifted by its publication lag. All series are forward-filled and aligned to business days, then expanded into roughly 400 stationary features (interaction ratios, multi-timeframe momentum, distance to the 200-day SMA, YoY acceleration, rolling 2-year Z-scores) by `engineer_macro_features()`.
 * **`market_api.py`**: Fetches the daily OHLCV price data of the target stock and left-joins it with the pre-cached macro matrix.
 * **`funds_api.py`**: Returns the financial statements of a ticker from the local cache (`data/raw/fundamentals/`), falling back to Yahoo Finance, filtered to the `FUNDAMENTAL_UNIVERSE`. It warns when the cache manifest shows that the cache is older than `fundamentals_max_age_days`.
-* **`company_profile.py`**: Uses the Gemini 2.5 Flash API to generate a one-sentence description for a ticker. Results are cached in `data/processed/company_profiles_cache.json`, which the pipeline commits, so only new tickers are requested.
+* **`company_profile.py`**: Uses the Gemini API (model `gemini_model` in `config/settings.yaml`) to generate a one-sentence description for a ticker. Results are cached in `data/processed/company_profiles_cache.json`, which the pipeline commits, so only new tickers are requested.
 
 ## 2. `processing/`
 Responsible for qualifying the universe, engineering the target-stock features and evaluating past predictions.
