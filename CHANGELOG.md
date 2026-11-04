@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.1.1](https://github.com/kleinnconrad/ml.prediction.stocks/compare/v2.1.0...v2.1.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* read the Gemini model from settings.yaml and switch to gemini-3.… ([34a6e57](https://github.com/kleinnconrad/ml.prediction.stocks/commit/34a6e5732094c9d225082a66e734fe7425e2b357))
+* read the Gemini model from settings.yaml and switch to gemini-3.5-flash-lite ([096e789](https://github.com/kleinnconrad/ml.prediction.stocks/commit/096e789f05c1da47e686fbc079385574205e638d))
+
 ## [2.1.0](https://github.com/kleinnconrad/ml.prediction.stocks/compare/v2.0.0...v2.1.0) (2026-10-09)
 
 
