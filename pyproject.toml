@@ -1,6 +1,6 @@
 [project]
 name = "stock-predictor"
-version = "2.1.1"
+version = "3.0.0"
 description = "Stock Predictor"
 requires-python = ">=3.12"
 dependencies = [
