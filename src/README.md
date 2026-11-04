@@ -11,19 +11,17 @@ This directory contains the codebase of the Xetra Two-Step Stock Prediction Engi
 
 ## Runtime View
 
-The local CLI (`batch_runner.py`) and the GitHub Actions scripts (`scripts/02_run_step1.py`, `scripts/03_run_step2.py`, `scripts/04_consolidate.py`) use the same per-ticker runners in `steps.py` and the same consolidation in `report.py`.
+The local CLI (`batch_runner.py`) and the GitHub Actions scripts (`scripts/02_run_step1.py`, `scripts/03_run_step2.py`, `scripts/04_consolidate.py`) use the same Step 1 and Step 2 runners in `steps.py` and the same consolidation in `report.py`. Step 1 runs once for the whole universe; Step 2 runs per UP ticker.
 
 ```mermaid
 sequenceDiagram
     participant BR as batch_runner.py / scripts
     participant T7 as xetra_t7.py
     participant QUAL as qualifier.py
-    participant GM as global_macro.py
     participant ST as steps.py
     participant MA as market_api.py
     participant FEAT as features.py
-    participant S1 as step1_macro.py
-    participant DIAG as diagnostics.py
+    participant S1 as step1_pooled.py
     participant CP as company_profile.py
     participant FA as funds_api.py
     participant S2 as step2_funds.py
@@ -35,28 +33,27 @@ sequenceDiagram
     T7->>QUAL: Pass raw T7 data
     QUAL-->>BR: Return qualified .DE Tickers
 
-    BR->>GM: 2. Build Macro Matrix (once per runner)
-    GM-->>BR: Return engineered Macro Matrix
-
-    loop For each ticker
-        BR->>ST: 3. run_step1_for_ticker
-        ST->>MA: Fetch OHLCV and join Macro
-        ST->>FEAT: Engineer Target & Technicals
-        ST->>S1: Purged CV, per-model KS cutoffs, final fit
-        S1->>DIAG: KS cutoff, confusion matrix, charts
+    BR->>ST: 2. run_step1_pooled (whole universe)
+    ST->>MA: Batch download of closes and volumes
+    ST->>S1: execute_step1_pooled
+    S1->>FEAT: Features, eligibility, within-date ranks, month-end panel
+    S1->>S1: Walk-forward validation, bootstrap CI, model gate
+    S1->>S1: Final fit, ranking of the last closed trading day
+    ST->>JE: Export the model summary
+    loop For each ticker with price data
         ST->>CP: Fetch Company Profile (cached)
         ST->>JE: Export payload and diagnostics
-
-        opt If passed Step 1
-            BR->>ST: 4. run_step2_for_ticker
-            ST->>FA: Load cached statements
-            ST->>S2: Evaluate applicable rules (YoY)
-            ST->>JE: Extend payload and diagnostics
-        end
     end
 
-    BR->>REP: 5. Consolidate, publish report, archive, prune history
-    BR->>UP: 6. Evaluate uplift of archived reports
+    loop For each UP ticker
+        BR->>ST: 3. run_step2_for_ticker
+        ST->>FA: Load cached statements
+        ST->>S2: Evaluate applicable rules (YoY)
+        ST->>JE: Extend payload and diagnostics
+    end
+
+    BR->>REP: 4. Consolidate, publish report with the model summary, archive, prune history
+    BR->>UP: 5. Evaluate uplift of archived reports
 ```
 
 Below is a breakdown of every folder and the responsibilities of each script.
@@ -64,34 +61,31 @@ Below is a breakdown of every folder and the responsibilities of each script.
 ---
 
 ## 1. `ingestion/`
-Responsible for extracting data from external APIs (Yahoo Finance, FRED, Xetra, Gemini) and the quantitative expansion of the macro data.
+Responsible for extracting data from external APIs (Yahoo Finance, Xetra, Gemini).
 
 * **`xetra_t7.py`**: Downloads and parses the Xetra T7 `allTradableInstruments.csv` from the Deutsche Börse network, extracting the raw universe of tradable securities.
-* **`global_macro.py`**: Fetches the macro universe (Yahoo Finance tickers and FRED series defined in `config/universe.py`). FRED series are fetched one by one, discontinued series are dropped, and every series is shifted by its publication lag. All series are forward-filled and aligned to business days, then expanded into roughly 400 stationary features (interaction ratios, multi-timeframe momentum, distance to the 200-day SMA, YoY acceleration, rolling 2-year Z-scores) by `engineer_macro_features()`.
-* **`market_api.py`**: Fetches the daily OHLCV price data of the target stock and left-joins it with the pre-cached macro matrix.
+* **`market_api.py`**: `fetch_price_panel()` downloads the adjusted daily closes and volumes of all tickers in batches (`price_download_batch_size`), re-downloads tickers that came back without data (`price_download_retries`, exponential backoff with jitter), drops the rows of the current Europe/Berlin day and returns a `PricePanel` (closes and volumes on the union calendar plus the tickers without data).
 * **`funds_api.py`**: Returns the financial statements of a ticker from the local cache (`data/raw/fundamentals/`), falling back to Yahoo Finance, filtered to the `FUNDAMENTAL_UNIVERSE`. It warns when the cache manifest shows that the cache is older than `fundamentals_max_age_days`.
 * **`company_profile.py`**: Uses the Gemini API (model `gemini_model` in `config/settings.yaml`) to generate a one-sentence description for a ticker. Results are cached in `data/processed/company_profiles_cache.json`, which the pipeline commits, so only new tickers are requested.
 
 ## 2. `processing/`
-Responsible for qualifying the universe, engineering the target-stock features and evaluating past predictions.
+Responsible for qualifying the universe, building the Step 1 inputs and evaluating past predictions.
 
-* **`qualifier.py`**: Filters the raw Xetra dataframe to common stocks of the product groups `DEUTSCHLAND`, `DAX`, `MDAX` and `SDAX` and maps their mnemonics to Yahoo Finance `.DE` tickers. No liquidity filter is applied.
-* **`features.py`**: Engineers target-stock technical features (21D/63D/126D/252D momentum, distance to the 50- and 200-day SMA, 21D volatility), computes the forward return over `horizon_days` and assigns the binary `Target` (1 if the return reaches `threshold`). It trims the warm-up history after the features are computed.
+* **`qualifier.py`**: Filters the raw Xetra dataframe to common stocks of the product groups `DEUTSCHLAND`, `DAX`, `MDAX` and `SDAX` and maps their mnemonics to Yahoo Finance `.DE` tickers. No liquidity filter is applied; the per-date eligibility of Step 1 is applied in `features.py`.
+* **`features.py`**: The feature registry (`FEATURE_FUNCTIONS`: returns over 21/63/126 days, 12-1 momentum, distance to the 50- and 200-day SMA, 21- and 126-day volatility, log traded value, 252-day drawdown), computed per stock on its own trading days together with the forward return over `horizon_days` and its end date. `build_feature_panel()` aligns all stocks on the union calendar (carrying a stock for at most `step1_ffill_limit_days`) and marks the eligible cells (features present, positive traded value, price above `step1_min_price_eur`); `rank_within_date()`, `month_end_dates()` and `to_long_panel()` build the ranked month-end panel with the binary target.
 * **`uplift_evaluator.py`**: Backtests the archived reports closest to 1, 3 and 6 months ago by measuring each stock's return from the report date and averaging it per prediction cohort. Stocks priced at or below `min_price_eur` are excluded, as on the dashboard. Run with `uv run python -m src.processing.uplift_evaluator`.
 
 ## 3. `modeling/`
-Houses the Scikit-Learn machine learning architecture, validation algorithms, and the fundamental ruleset.
+Houses the Step 1 model, its validation and the fundamental ruleset.
 
-* **`base_pipeline.py`**: Defines the Scikit-Learn pipeline (median imputation, variance threshold, Z-scaling, ANOVA pre-filter, Sequential Feature Selection, class-balanced Logistic Regression) and `purged_time_series_cv()`, which builds expanding-window splits with a gap of `horizon_days` rows between training and test data.
-* **`diagnostics.py`**: Calculates the KS statistic and cutoff, rejects degenerate cutoffs, classifies a model's predictions with the KS cutoff learned on the same model's training rows, and saves confusion matrix and lift charts (Agg backend).
-* **`step1_macro.py`**: Executes Step 1: validates the model with purged cross-validation, classifying each fold model with its own training-data KS cutoff, rejects tickers that cannot be validated with a `cv_status`, fits the final model, extracts the selected features and weights, and applies the CV accuracy gate, the confusion matrix rule and the final model's KS cutoff to the latest prediction.
+* **`step1_pooled.py`**: Executes Step 1 (`execute_step1_pooled()`): one L2 logistic regression with shared coefficients for all stocks (`fit_pooled_model()`), the yearly walk-forward validation with a 126-day purge (`walk_forward_validation()`), the per-date cross-sectional AUC (`per_date_auc()`), the moving-block bootstrap CI (`block_bootstrap_ci()`), the model gate (`evaluate_gate()`) and the ranking of the scoring date with the top-share UP rule (`score_cross_section()`). It returns the per-ticker results, the model summary and the validation, and builds the per-ticker `step1_model` entries.
 * **`step2_funds.py`**: Implements the deterministic Fundamental Rules Engine. It compares the latest statement with the same period one year earlier (falling back to the previous statement), skips rules whose inputs are not reported, and passes companies that meet the pro-rated `min_step2_score` on at least `min_step2_applicable_rules` applicable rules.
 
 ## 4. `orchestration/`
 The control layer that manages execution flow and artifact storage.
 
-* **`steps.py`**: `run_step1_for_ticker()` and `run_step2_for_ticker()`, shared by the local CLI and the GitHub Actions scripts. Step 2 extends the Step 1 payload and diagnostics instead of replacing them.
-* **`report.py`**: Consolidates the shard outputs into one payload per ticker, writes `full_batch_report.json` and `final_buy_signals.csv`, archives the report, prunes the history by report date and updates the company profile cache.
-* **`batch_runner.py`**: The local CLI flow. It qualifies the tickers, fetches the macro matrix once, runs both steps per ticker sequentially and publishes the report with `report.py`.
-* **`json_exporter.py`**: Serializes payloads and diagnostics. It converts numpy types and non-finite floats (to `null`) and replaces files atomically, so a failed write never truncates an existing file.
+* **`steps.py`**: `run_step1_pooled()` (download, model, export of the model summary and of one payload per ticker with price data; with `only_tickers`, only those payloads are exported) and `run_step2_for_ticker()`, shared by the local CLI and the GitHub Actions scripts, plus the readers and writers of `data/state/qualified_tickers.csv` and `data/state/step1_passed.csv`. Step 2 extends the Step 1 payload and diagnostics instead of replacing them.
+* **`report.py`**: Consolidates the shard outputs into one payload per ticker, writes `full_batch_report.json` (with the model summary as `step1_model`) and `final_buy_signals.csv`, archives the report, prunes the history by report date and updates the company profile cache.
+* **`batch_runner.py`**: The local CLI flow. `run_batch()` qualifies the tickers, runs Step 1 once for all of them, Step 2 for every UP ticker, and publishes the report with `report.py`. `run_single()` ranks the universe of `data/state/qualified_tickers.csv` and exports one ticker.
+* **`json_exporter.py`**: Serializes payloads, diagnostics and the model summary. It converts numpy types and non-finite floats (to `null`) and replaces files atomically, so a failed write never truncates an existing file.
 * **`logging_setup.py`**: Configures logging for the CLI and the scripts.

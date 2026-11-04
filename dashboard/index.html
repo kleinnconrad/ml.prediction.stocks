@@ -15,7 +15,7 @@
   <div class="container">
     <header class="glass-panel main-header">
       <h1 class="gradient-text">stock-predictor</h1>
-      <p class="subtitle">prediction based on a two step model approach: logistic regression -> financial statement analysis.</p>
+      <p class="subtitle">Step 1 ranks all stocks against each other with one pooled model; the top <span id="up-share-label">10%</span> are UP. Step 2 checks the financial statements of the UP stocks.</p>
       
       <div class="metadata-section">
         <div class="metadata-item">
@@ -37,7 +37,7 @@
         <p class="kpi-value highlight" id="kpi-buys">-</p>
       </div>
       <div class="glass-panel kpi-card">
-        <h3>Step 1 Passes (UP)</h3>
+        <h3 id="kpi-up-label" title="Stocks in the top share of the Step 1 ranking (UP and UP_FINAL_BUY) among the displayed stocks">Step 1 UP (Top Share)</h3>
         <p class="kpi-value" id="kpi-up">-</p>
       </div>
       <div class="glass-panel kpi-card">
@@ -45,8 +45,9 @@
         <p class="kpi-value" id="kpi-notup">-</p>
       </div>
       <div class="glass-panel kpi-card">
-        <h3>Avg CV Accuracy</h3>
-        <p class="kpi-value" id="kpi-acc">-</p>
+        <h3 title="Mean per-date cross-sectional AUC of the walk-forward validation of the pooled Step 1 model, with its 95% block-bootstrap CI and the model gate">Validation AUC</h3>
+        <p class="kpi-value" id="kpi-auc">-</p>
+        <p class="kpi-detail" id="kpi-auc-detail"></p>
       </div>
       <div class="glass-panel kpi-card">
         <h3>Failed Step 2</h3>
@@ -62,7 +63,15 @@
       </div>
     </section>
 
-    <!-- Section 0: Uplift Chart -->
+    <!-- Section 0: Step 1 model -->
+    <section class="glass-panel table-container">
+      <h2 class="table-title">STEP 1 MODEL (POOLED RANKING)</h2>
+      <div id="model-panel">
+        <!-- Model summary injected here -->
+      </div>
+    </section>
+
+    <!-- Section 1: Uplift Chart -->
     <section class="glass-panel table-container highlighted-table-container">
       <h2 class="table-title">PREDICTION UPLIFT (PERFORMANCE)</h2>
       <p id="uplift-metadata" style="text-align: center; color: var(--text-muted); font-size: 0.85rem; margin-bottom: 1rem;"></p>
@@ -89,7 +98,7 @@
       </select>
     </div>
 
-    <!-- Section 1: Buy Candidates -->
+    <!-- Section 2: Buy Candidates -->
     <section class="glass-panel table-container highlighted-table-container">
       <h2 class="table-title">BUY CANDIDATES</h2>
       <div class="table-wrapper">
@@ -102,11 +111,11 @@
               <th data-sort="beta" data-target="buys" title="Beta: Measures the stock's volatility relative to the overall market (Beta > 1 means more volatile, Beta < 1 means less volatile).">Beta <span class="sort-icon"></span></th>
               <th data-sort="liquidity" data-target="buys" title="Liquidity (Avg Daily Traded Value in €M): High liquidity means less orderbook slippage when selling. Low liquidity means a large order might significantly impact the stock price.">Liq. (€M) <span class="sort-icon"></span></th>
               <th data-sort="final_prediction" data-target="buys">Final Status <span class="sort-icon"></span></th>
-              <th data-sort="step1_class" data-target="buys">Step 1 Status <span class="sort-icon"></span></th>
-              <th data-sort="cv_accuracy" data-target="buys">CV Accuracy <span class="sort-icon"></span></th>
-              <th data-sort="ks_cutoff" data-target="buys">KS Cutoff <span class="sort-icon"></span></th>
-              <th>CV Matrix</th>
-              <th>CM Rule</th>
+              <th data-sort="probability" data-target="buys" title="Step 1: predicted probability of a gain of at least the threshold, from the pooled model">Probability <span class="sort-icon"></span></th>
+              <th data-sort="rank" data-target="buys" title="Step 1: rank among all ranked stocks of the scoring date (1 = highest probability)">Rank <span class="sort-icon"></span></th>
+              <th data-sort="top_percent" data-target="buys" title="Step 1: position in the ranking as a share of the ranked stocks">Top % <span class="sort-icon"></span></th>
+              <th data-sort="step1_class" data-target="buys">Step 1 Class <span class="sort-icon"></span></th>
+              <th data-sort="step1_status" data-target="buys" title="Step 1: ok, model_gate_failed or not eligible with the reason">Status <span class="sort-icon"></span></th>
             </tr>
           </thead>
           <tbody id="buys-table-body">
@@ -116,7 +125,7 @@
       </div>
     </section>
 
-    <!-- Section 2: Other Stocks -->
+    <!-- Section 3: Other Stocks -->
     <section class="glass-panel table-container">
       <h2 class="table-title">OTHER EVALUATED STOCKS</h2>
       <div class="table-wrapper">
@@ -129,11 +138,11 @@
               <th data-sort="beta" data-target="other" title="Beta: Measures the stock's volatility relative to the overall market (Beta > 1 means more volatile, Beta < 1 means less volatile).">Beta <span class="sort-icon"></span></th>
               <th data-sort="liquidity" data-target="other" title="Liquidity (Avg Daily Traded Value in €M): High liquidity means less orderbook slippage when selling. Low liquidity means a large order might significantly impact the stock price.">Liq. (€M) <span class="sort-icon"></span></th>
               <th data-sort="final_prediction" data-target="other">Final Status <span class="sort-icon"></span></th>
-              <th data-sort="step1_class" data-target="other">Step 1 Status <span class="sort-icon"></span></th>
-              <th data-sort="cv_accuracy" data-target="predictions">CV Accuracy <span class="sort-icon"></span></th>
-              <th data-sort="ks_cutoff" data-target="predictions">KS Cutoff <span class="sort-icon"></span></th>
-              <th>CV Matrix</th>
-              <th>CM Rule</th>
+              <th data-sort="probability" data-target="other" title="Step 1: predicted probability of a gain of at least the threshold, from the pooled model">Probability <span class="sort-icon"></span></th>
+              <th data-sort="rank" data-target="other" title="Step 1: rank among all ranked stocks of the scoring date (1 = highest probability)">Rank <span class="sort-icon"></span></th>
+              <th data-sort="top_percent" data-target="other" title="Step 1: position in the ranking as a share of the ranked stocks">Top % <span class="sort-icon"></span></th>
+              <th data-sort="step1_class" data-target="other">Step 1 Class <span class="sort-icon"></span></th>
+              <th data-sort="step1_status" data-target="other" title="Step 1: ok, model_gate_failed or not eligible with the reason">Status <span class="sort-icon"></span></th>
             </tr>
           </thead>
           <tbody id="table-body">
@@ -142,7 +151,7 @@
         </table>
       </div>
     </section>
-    <!-- Section 3: Variables -->
+    <!-- Section 4: Variables -->
     <section class="glass-panel variables-section" style="margin-top: 2rem;">
       <h2 class="table-title">PREDICTION VARIABLES</h2>
       <div class="controls" style="margin-bottom: 1rem; border: none; padding: 0;">
@@ -154,6 +163,6 @@
     </section>
   </div>
 
-  <script src="app.js?v=5"></script>
+  <script src="app.js?v=6"></script>
 </body>
 </html>

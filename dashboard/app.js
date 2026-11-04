@@ -9,7 +9,7 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-// Formats a report parameter; nested settings (e.g. FRED publication lags) are shown as JSON.
+// Formats a report parameter; nested settings (e.g. the Step 1 feature list) are shown as JSON.
 function formatParam(value) {
   return value !== null && typeof value === 'object' ? JSON.stringify(value) : value;
 }
@@ -20,12 +20,28 @@ function isStep2Evaluable(d) {
   return Boolean(diag) && diag.Evaluable !== false;
 }
 
+// Number formatting for fields that are missing in older reports or for unranked stocks.
+function fmtNumber(value, digits) {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : 'N/A';
+}
+
+function fmtPercent(share, digits) {
+  return typeof share === 'number' && Number.isFinite(share) ? `${(share * 100).toFixed(digits)}%` : 'N/A';
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   let reportData = [];
   let executionDate = null;
   let parameters = {};
-  
-  let currentSort = { column: 'final_prediction', asc: true };
+  // Report-level summary of the pooled Step 1 model; absent in reports before 3.0.0
+  let step1Model = null;
+
+  // Best-ranked stocks first; stocks without a rank (not eligible, older reports) last
+  let currentSort = { column: 'rank', asc: true };
 
   const tableBodyOther = document.getElementById('table-body');
   const tableBodyBuys = document.getElementById('buys-table-body');
@@ -36,8 +52,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const kpiTotal = document.getElementById('kpi-total');
   const kpiBuys = document.getElementById('kpi-buys');
   const kpiUp = document.getElementById('kpi-up');
+  const kpiUpLabel = document.getElementById('kpi-up-label');
   const kpiNotUp = document.getElementById('kpi-notup');
-  const kpiAcc = document.getElementById('kpi-acc');
+  const kpiAuc = document.getElementById('kpi-auc');
+  const kpiAucDetail = document.getElementById('kpi-auc-detail');
   const kpiFailedStep2 = document.getElementById('kpi-failed-step2');
   const kpiMissingData = document.getElementById('kpi-missing-data');
   const kpiSuppressed = document.getElementById('kpi-suppressed');
@@ -70,6 +88,7 @@ document.addEventListener('DOMContentLoaded', () => {
          reportData = data.predictions || [];
          executionDate = data.execution_date;
          parameters = data.parameters || {};
+         step1Model = isPlainObject(data.step1_model) ? data.step1_model : null;
       }
       
       // Stocks priced at or below min_price_eur (settings.yaml, 10 EUR) are hidden from all KPIs and
@@ -84,6 +103,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       renderMetadata();
       calculateKPIs();
+      renderModelPanel(minPrice);
       renderTables();
       renderVariables();
     })
@@ -234,16 +254,27 @@ document.addEventListener('DOMContentLoaded', () => {
       badge.innerHTML = `<strong>${escapeHtml(key)}:</strong> ${escapeHtml(formatParam(value))}`;
       metaParams.appendChild(badge);
     }
+
+    const shareLabel = document.getElementById('up-share-label');
+    if (shareLabel && typeof upShare() === 'number') shareLabel.textContent = fmtPercent(upShare(), 0);
+  }
+
+  // Share of the ranking marked UP: from the model summary, else from the parameters
+  function upShare() {
+    const share = step1Model?.cross_section?.up_share ?? parameters.step1_up_share;
+    return typeof share === 'number' ? share : null;
   }
 
   function calculateKPIs() {
     kpiTotal.textContent = reportData.length;
-    
+
     const buys = reportData.filter(d => d.final_prediction === 'UP_FINAL_BUY').length;
     kpiBuys.textContent = buys;
-    
-    const up = reportData.filter(d => d.final_prediction === 'UP').length;
-    kpiUp.textContent = up;
+
+    // Step 2 only runs for Step 1 UP stocks, so UP and UP_FINAL_BUY together are the Step 1 passes
+    const step1Up = reportData.filter(d => d.final_prediction === 'UP' || d.final_prediction === 'UP_FINAL_BUY').length;
+    kpiUp.textContent = step1Up;
+    if (kpiUpLabel && typeof upShare() === 'number') kpiUpLabel.textContent = `Step 1 UP (Top ${fmtPercent(upShare(), 0)})`;
     
     const notUp = reportData.filter(d => d.final_prediction === 'NOT_UP').length;
     kpiNotUp.textContent = notUp;
@@ -258,16 +289,80 @@ document.addEventListener('DOMContentLoaded', () => {
       kpiSuppressed.textContent = suppressedBuys > 0 ? `${suppressedCount} (${suppressedBuys} buys)` : suppressedCount;
     }
 
-    const accuracies = reportData
-      .filter(d => d.step1_model && d.step1_model.cv_accuracy)
-      .map(d => d.step1_model.cv_accuracy);
-    
-    if (accuracies.length > 0) {
-      const avg = accuracies.reduce((a, b) => a + b, 0) / accuracies.length;
-      kpiAcc.textContent = (avg * 100).toFixed(1) + '%';
-    } else {
-      kpiAcc.textContent = 'N/A';
+    // Walk-forward validation of the pooled model: mean per-date cross-sectional AUC
+    const validation = step1Model?.validation;
+    const gate = step1Model?.gate;
+    if (kpiAuc) kpiAuc.textContent = fmtNumber(validation?.auc_mean, 3);
+    if (kpiAucDetail) {
+      const ci = Array.isArray(validation?.auc_ci) ? validation.auc_ci : null;
+      const ciText = ci ? `95% CI ${fmtNumber(ci[0], 3)}-${fmtNumber(ci[1], 3)}` : 'CI N/A';
+      const gateText = typeof gate?.passed === 'boolean'
+        ? (gate.passed ? 'gate PASS' : `gate FAIL (${gate.reason || 'unknown'})`)
+        : 'gate N/A';
+      kpiAucDetail.textContent = step1Model ? `${ciText} | ${gateText}` : 'No model summary in this report';
     }
+  }
+
+  // Model-level Step 1 results: coefficients, validation per year and the cross-section
+  function renderModelPanel(minDisplayPrice) {
+    const container = document.getElementById('model-panel');
+    if (!container) return;
+    if (!step1Model) {
+      container.innerHTML = '<div style="color: var(--text-muted);">No model summary in this report (reports before release 3.0.0 have none).</div>';
+      return;
+    }
+    const cross = isPlainObject(step1Model.cross_section) ? step1Model.cross_section : {};
+    const validation = isPlainObject(step1Model.validation) ? step1Model.validation : {};
+    const gate = isPlainObject(step1Model.gate) ? step1Model.gate : {};
+    const ci = Array.isArray(validation.auc_ci) ? validation.auc_ci : [null, null];
+    const gateText = typeof gate.passed === 'boolean'
+      ? (gate.passed ? 'PASS' : `FAIL (${gate.reason || 'unknown'})`) : 'N/A';
+    const eligiblePrice = typeof parameters.step1_min_price_eur === 'number' ? parameters.step1_min_price_eur : 1;
+    const notEligible = isPlainObject(cross.not_eligible)
+      ? Object.entries(cross.not_eligible).filter(([, n]) => n > 0).map(([k, n]) => `${k}: ${n}`).join(', ') : '';
+
+    const facts = [
+      ['Scoring date', step1Model.scoring_date || 'N/A'],
+      ['Ranked stocks', typeof cross.n_ranked === 'number' ? `${cross.n_ranked} of ${cross.n_universe ?? 'N/A'}` : 'N/A'],
+      ['UP stocks', typeof cross.n_up === 'number' ? `${cross.n_predicted_up ?? 'N/A'} (top share ${fmtPercent(cross.up_share, 0)} = ${cross.n_up})` : 'N/A'],
+      ['Validation AUC (mean per date)', `${fmtNumber(validation.auc_mean, 3)} (95% CI ${fmtNumber(ci[0], 3)}-${fmtNumber(ci[1], 3)}, ${validation.n_dates ?? 'N/A'} dates)`],
+      ['Model gate', `${gateText}; lower CI bound must exceed ${fmtNumber(gate.threshold, 2)}`],
+      ['Dates with AUC > 0.5', fmtPercent(validation.share_dates_above_half, 0)],
+      ['Top-share hit rate vs. base rate', `${fmtPercent(validation.top_hit_rate, 1)} vs. ${fmtPercent(validation.base_rate, 1)}`],
+      ['Top share minus universe (forward return)', fmtPercent(validation.top_minus_universe_fwd, 1)],
+      ['In-sample vs. out-of-sample AUC', `${fmtNumber(validation.is_auc_mean, 3)} vs. ${fmtNumber(validation.oos_auc_mean, 3)}`],
+      ['Not eligible', notEligible || 'none'],
+    ];
+    const factsHtml = facts.map(([k, v]) =>
+      `<div class="var-item"><span class="var-key">${escapeHtml(k)}</span><span class="var-value">${escapeHtml(v)}</span></div>`).join('');
+
+    const coefficients = isPlainObject(step1Model.coefficients) ? Object.entries(step1Model.coefficients) : [];
+    coefficients.sort((a, b) => Math.abs(Number(b[1]) || 0) - Math.abs(Number(a[1]) || 0));
+    let coefRows = coefficients.map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${fmtNumber(v, 3)}</td></tr>`).join('');
+    coefRows += `<tr><td style="color: var(--text-muted);">intercept</td><td>${fmtNumber(step1Model.intercept, 3)}</td></tr>`;
+
+    const years = Array.isArray(validation.years) ? validation.years : [];
+    const yearRows = years.map(y => (y && y.status === 'ok')
+      ? `<tr><td>${escapeHtml(y.year)}</td><td>${escapeHtml(y.n_test_dates)}</td><td>${fmtNumber(y.auc_mean, 3)}</td>`
+        + `<td>${fmtNumber(y.oos_auc, 3)}</td><td>${fmtNumber(y.is_auc, 3)}</td><td>${fmtPercent(y.top_hit_rate, 1)}</td><td>${fmtPercent(y.base_rate, 1)}</td></tr>`
+      : `<tr><td>${escapeHtml(y?.year)}</td><td colspan="6" style="color: var(--text-muted);">${escapeHtml(y?.status || 'N/A')}</td></tr>`).join('');
+
+    container.innerHTML = `
+      <p class="model-note">One logistic regression with shared coefficients ranks all eligible stocks of the scoring date
+        against each other; the top share is UP if the model gate passes. Ranks are computed over all stocks above
+        EUR ${escapeHtml(eligiblePrice)}; the tables below hide stocks at or below EUR ${escapeHtml(minDisplayPrice)}, so the displayed ranks have gaps.</p>
+      <div class="var-grid model-facts">${factsHtml}</div>
+      <div class="model-tables">
+        <div class="model-table-wrapper">
+          <h4>Coefficients (rank features, sorted by absolute value)</h4>
+          <table class="model-table"><thead><tr><th>Feature</th><th>Coefficient</th></tr></thead><tbody>${coefRows}</tbody></table>
+        </div>
+        <div class="model-table-wrapper">
+          <h4>Walk-forward validation per year</h4>
+          <table class="model-table"><thead><tr><th>Year</th><th>Dates</th><th>AUC</th><th>OOS AUC</th><th>IS AUC</th><th>Top hit</th><th>Base</th></tr></thead>
+            <tbody>${yearRows || '<tr><td colspan="7">N/A</td></tr>'}</tbody></table>
+        </div>
+      </div>`;
   }
 
   function getStatusHtml(status) {
@@ -285,13 +380,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const companyName = escapeHtml(d.company_name || '');
     const companyDesc = escapeHtml(d.company_description || '');
     const priceStr = typeof d.latest_price === 'number' ? `€${d.latest_price.toFixed(2)}` : 'N/A';
-    const acc = d.step1_model?.cv_accuracy ? (d.step1_model.cv_accuracy * 100).toFixed(1) : 0;
-    const ksRaw = d.step1_model?.ks_cutoff;
-    const ks = typeof ksRaw === 'number' ? ksRaw.toFixed(3) : escapeHtml(ksRaw || 'N/A');
-    const step1Class = d.step1_model?.predicted_class || 'N/A';
-    const cvStatus = d.step1_model?.cv_status;
-    const accFallback = cvStatus && cvStatus !== 'ok'
-      ? `<span title="${escapeHtml(cvStatus)}">N/A (${escapeHtml(cvStatus.split(':')[0])})</span>`
+    const s1 = isPlainObject(d.step1_model) ? d.step1_model : {};
+    const step1Class = s1.predicted_class || 'N/A';
+    const probability = fmtNumber(s1.probability, 3);
+    const rankStr = typeof s1.rank === 'number'
+      ? `${s1.rank} / ${typeof s1.n_ranked === 'number' ? s1.n_ranked : 'N/A'}`
+      : 'N/A';
+    const topPercent = typeof s1.top_percent === 'number' ? `${s1.top_percent.toFixed(1)}%` : 'N/A';
+    // Reports before 3.0.0 carry a per-stock cv_status instead of the pooled status
+    const statusRaw = typeof s1.status === 'string' ? s1.status : (typeof s1.cv_status === 'string' ? s1.cv_status : '');
+    const statusHtml = statusRaw
+      ? `<span title="${escapeHtml(statusRaw)}">${escapeHtml(statusRaw.replace('not_eligible: ', 'not eligible: '))}</span>`
       : 'N/A';
     const peRatio = typeof d.pe_ratio === 'number' ? d.pe_ratio.toFixed(2) : escapeHtml(d.pe_ratio || 'N/A');
     const beta = typeof d.beta === 'number' ? d.beta.toFixed(2) : escapeHtml(d.beta || 'N/A');
@@ -306,40 +405,6 @@ document.addEventListener('DOMContentLoaded', () => {
       </td>`;
     }
 
-    let cmHtml = '<td style="color: var(--text-muted);">N/A</td>';
-    let cmRuleHtml = '<td style="color: var(--text-muted);">N/A</td>';
-    if (d.step1_model && d.step1_model.cv_confusion_matrix) {
-      const cm = d.step1_model.cv_confusion_matrix;
-      cmHtml = `
-        <td>
-          <table style="font-size: 0.75rem; text-align: center; border-collapse: collapse; margin: 0 auto;">
-            <tr>
-              <td></td>
-              <td style="color: var(--text-muted); padding-bottom: 2px;">Pred NOT_UP</td>
-              <td style="color: var(--text-muted); padding-bottom: 2px;">Pred UP</td>
-            </tr>
-            <tr>
-              <td style="color: var(--text-muted); text-align: right; padding-right: 6px;">True NOT_UP</td>
-              <td style="border: 1px dashed var(--border-color); padding: 4px;" class="true-negative" title="True Negative">${escapeHtml(cm.TN)}</td>
-              <td style="border: 1px dashed var(--border-color); padding: 4px;" class="false-positive" title="False Positive">${escapeHtml(cm.FP)}</td>
-            </tr>
-            <tr>
-              <td style="color: var(--text-muted); text-align: right; padding-right: 6px;">True UP</td>
-              <td style="border: 1px dashed var(--border-color); padding: 4px;" class="false-negative" title="False Negative">${escapeHtml(cm.FN)}</td>
-              <td style="border: 1px dashed var(--border-color); padding: 4px;" class="true-positive" title="True Positive">${escapeHtml(cm.TP)}</td>
-            </tr>
-          </table>
-        </td>
-      `;
-      cmRuleHtml = `
-        <td style="font-size: 0.9rem; font-weight: bold;">
-          ${d.step1_model.cm_rule_passed 
-            ? '<span style="color: var(--status-green);" title="TP > FN & TN > FP">PASS</span>' 
-            : '<span style="color: var(--status-red);" title="TP > FN & TN > FP not met">FAIL</span>'}
-        </td>
-      `;
-    }
-
     return `
       <td class="ticker-name">
         <div style="font-weight: bold;">${stockName}</div>
@@ -351,13 +416,11 @@ document.addEventListener('DOMContentLoaded', () => {
       <td>${beta}</td>
       ${liquidityHtml}
       <td>${getStatusHtml(d.final_prediction)}</td>
+      <td>${probability}</td>
+      <td>${escapeHtml(rankStr)}</td>
+      <td>${escapeHtml(topPercent)}</td>
       <td>${getStatusHtml(step1Class)}</td>
-      <td>
-        ${acc > 0 ? `${acc}% <div class="acc-bar-bg"><div class="acc-bar-fill" style="width: ${acc}%"></div></div>` : accFallback}
-      </td>
-      <td>${ks}</td>
-      ${cmHtml}
-      ${cmRuleHtml}
+      <td style="font-size: 0.85em;">${statusHtml}</td>
     `;
   }
 
@@ -402,12 +465,16 @@ document.addEventListener('DOMContentLoaded', () => {
       } else if (col === 'step1_class') {
         valA = a.step1_model?.predicted_class || '';
         valB = b.step1_model?.predicted_class || '';
-      } else if (col === 'cv_accuracy') {
-        valA = a.step1_model?.cv_accuracy || 0;
-        valB = b.step1_model?.cv_accuracy || 0;
-      } else if (col === 'ks_cutoff') {
-        valA = a.step1_model?.ks_cutoff || 0;
-        valB = b.step1_model?.ks_cutoff || 0;
+      } else if (col === 'probability') {
+        valA = typeof a.step1_model?.probability === 'number' ? a.step1_model.probability : -1;
+        valB = typeof b.step1_model?.probability === 'number' ? b.step1_model.probability : -1;
+      } else if (col === 'rank' || col === 'top_percent') {
+        // Unranked stocks sort after the ranked ones
+        valA = typeof a.step1_model?.[col] === 'number' ? a.step1_model[col] : Infinity;
+        valB = typeof b.step1_model?.[col] === 'number' ? b.step1_model[col] : Infinity;
+      } else if (col === 'step1_status') {
+        valA = a.step1_model?.status ?? a.step1_model?.cv_status ?? '';
+        valB = b.step1_model?.status ?? b.step1_model?.cv_status ?? '';
       }
 
       if (valA < valB) return currentSort.asc ? -1 : 1;
@@ -489,13 +556,23 @@ document.addEventListener('DOMContentLoaded', () => {
       const stockName = escapeHtml(rawStockName);
       
       let step1Html = '';
-      if (d.step1_model && d.step1_model.selected_predictors_and_weights) {
+      const percentiles = d.step1_model?.feature_percentiles;
+      if (isPlainObject(percentiles) && Object.keys(percentiles).length > 0) {
+        const contributions = isPlainObject(d.step1_model.logit_contributions) ? d.step1_model.logit_contributions : {};
         let items = '';
-        for (const [k, v] of Object.entries(d.step1_model.selected_predictors_and_weights)) {
-          items += `<div class="var-item"><span class="var-key">${escapeHtml(k)}</span><span class="var-value">${Number(v).toFixed(4)}</span></div>`;
+        for (const [k, v] of Object.entries(percentiles)) {
+          const pct = typeof v === 'number' && Number.isFinite(v) ? Math.min(Math.max(v, 0), 100) : null;
+          const bar = pct === null ? '' : `<div class="acc-bar-bg"><div class="acc-bar-fill" style="width: ${pct.toFixed(0)}%"></div></div>`;
+          const contribution = contributions[k];
+          const contributionStr = typeof contribution === 'number' && Number.isFinite(contribution)
+            ? `${contribution >= 0 ? '+' : ''}${contribution.toFixed(3)}` : 'N/A';
+          items += `<div class="var-item"><span class="var-key">${escapeHtml(k)}</span>`
+            + `<span class="var-value"><span title="Percentile among the ranked stocks">pct ${pct === null ? 'N/A' : pct.toFixed(0)}</span> ${bar} <span title="Contribution to the log-odds relative to a median stock">${contributionStr}</span></span></div>`;
         }
-        
-        step1Html = `<h4>Step 1: Macro Predictors & Weights</h4><div class="var-grid">${items}</div>`;
+        step1Html = `<h4>Step 1: Feature percentiles and contributions</h4>`
+          + `<p class="model-note">Percentile of the stock among the ranked stocks of ${escapeHtml(d.step1_model.scoring_date || 'the scoring date')}; `
+          + `contribution = coefficient x (percentile / 100 - 0.5), the change of the log-odds relative to a median stock.</p>`
+          + `<div class="var-grid">${items}</div>`;
       }
       
       let step2Html = '';

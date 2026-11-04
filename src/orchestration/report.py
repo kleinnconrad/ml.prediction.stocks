@@ -73,7 +73,8 @@ def consolidate_predictions(prediction_files: Iterable[str]) -> List[Dict[str, A
 
 
 def build_report(predictions: List[Dict[str, Any]], settings: Dict[str, Any],
-                 now: Optional[datetime] = None) -> Dict[str, Any]:
+                 now: Optional[datetime] = None,
+                 step1_model_summary: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Builds the batch report published to the dashboard.
 
@@ -81,16 +82,48 @@ def build_report(predictions: List[Dict[str, Any]], settings: Dict[str, Any],
         predictions (List[Dict[str, Any]]): Consolidated payloads.
         settings (Dict[str, Any]): Settings used for the run.
         now (Optional[datetime]): Execution time (UTC); defaults to the current time.
+        step1_model_summary (Optional[Dict[str, Any]]): Summary of the pooled Step 1 model
+            (validation, gate, coefficients), written as the top-level key `step1_model`.
+            The key is omitted if no summary is given.
 
     Returns:
         Dict[str, Any]: The report.
     """
     now = now or datetime.now(timezone.utc)
-    return {
+    report: Dict[str, Any] = {
         "execution_date": now.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
         "parameters": settings,
-        "predictions": predictions,
     }
+    if step1_model_summary is not None:
+        report["step1_model"] = step1_model_summary
+    report["predictions"] = predictions
+    return report
+
+
+def load_model_summary(pattern: str) -> Optional[Dict[str, Any]]:
+    """
+    Loads the Step 1 model summary from the downloaded artifacts.
+
+    Every Step 2 shard artifact carries an identical copy, so the first file in sorted
+    order is used.
+
+    Args:
+        pattern (str): Glob in which `**` matches any number of directories.
+
+    Returns:
+        Optional[Dict[str, Any]]: The summary, or None (with a warning) if no file matches
+        or the file cannot be read.
+    """
+    paths = sorted(glob.glob(pattern, recursive=True))
+    if not paths:
+        logger.warning(f"No Step 1 model summary matches {pattern}; the report is published without 'step1_model'.")
+        return None
+    try:
+        with open(paths[0], 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning(f"Failed to read the Step 1 model summary {paths[0]}: {e}")
+        return None
 
 
 def write_final_buy_signals(predictions: List[Dict[str, Any]], path: str) -> List[str]:
@@ -189,7 +222,8 @@ def update_profile_cache(predictions: List[Dict[str, Any]], cache_path: str) -> 
 
 
 def publish_report(predictions: List[Dict[str, Any]], settings: Dict[str, Any], out_dir: str,
-                   now: Optional[datetime] = None) -> Dict[str, Any]:
+                   now: Optional[datetime] = None,
+                   step1_model_summary: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Writes full_batch_report.json and final_buy_signals.csv to `out_dir`, archives the
     report under `out_dir`/history, prunes reports older than `history_retention_days`
@@ -200,12 +234,14 @@ def publish_report(predictions: List[Dict[str, Any]], settings: Dict[str, Any], 
         settings (Dict[str, Any]): Settings used for the run.
         out_dir (str): Output directory (data/processed in production).
         now (Optional[datetime]): Execution time (UTC); defaults to the current time.
+        step1_model_summary (Optional[Dict[str, Any]]): Step 1 model summary, published as
+            the report key `step1_model` (omitted if None).
 
     Returns:
         Dict[str, Any]: The published report.
     """
     now = now or datetime.now(timezone.utc)
-    report = build_report(predictions, settings, now)
+    report = build_report(predictions, settings, now, step1_model_summary)
     write_json_atomic(os.path.join(out_dir, 'full_batch_report.json'), report)
     buys = write_final_buy_signals(predictions, os.path.join(out_dir, 'final_buy_signals.csv'))
     history_dir = os.path.join(out_dir, 'history')

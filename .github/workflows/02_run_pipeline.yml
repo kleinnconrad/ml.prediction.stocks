@@ -8,11 +8,9 @@ permissions:
   contents: write
 
 jobs:
-  step1-matrix:
+  # One pooled model ranks all stocks against each other, so Step 1 runs on a single runner
+  step1:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        shard: [0, 1, 2]
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
@@ -25,29 +23,30 @@ jobs:
 
       - name: Execute Step 1 Model
         env:
-          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: uv run --locked python scripts/02_run_step1.py --shard ${{ matrix.shard }} --total 3
+        run: uv run --locked python scripts/02_run_step1.py
 
       - name: Upload Step 1 State Artifact
         uses: actions/upload-artifact@v7
         with:
-          name: step1-state-shard-${{ matrix.shard }}
+          name: step1-state
           path: |
-            data/state/step1_passed_shard_${{ matrix.shard }}.csv
+            data/state/step1_passed.csv
           retention-days: 7
-          
+
+      # Every uploaded file must stay under outputs/, so that the artifact root is outputs/
+      # (the model summary is outputs/diagnostics/step1_model_summary.json)
       - name: Upload Step 1 Outputs
         uses: actions/upload-artifact@v7
         with:
-          name: step1-outputs-shard-${{ matrix.shard }}
+          name: step1-outputs
           path: |
             outputs/predictions/
             outputs/diagnostics/
           retention-days: 7
 
   step2-matrix:
-    needs: step1-matrix
+    needs: step1
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -62,19 +61,17 @@ jobs:
           version: "0.12.17"
           enable-cache: true
 
-      - name: Download Step 1 Artifacts
+      - name: Download Step 1 State Artifact
         uses: actions/download-artifact@v8
         with:
-          pattern: step1-state-shard-*
+          name: step1-state
           path: data/state
-          merge-multiple: true
 
       - name: Download Step 1 Outputs
         uses: actions/download-artifact@v8
         with:
-          pattern: step1-outputs-shard-*
+          name: step1-outputs
           path: outputs
-          merge-multiple: true
 
       - name: Execute Step 2 Model
         run: uv run --locked python scripts/03_run_step2.py --shard ${{ matrix.shard }} --total 3
@@ -109,8 +106,12 @@ jobs:
 
       - name: Consolidate Shards
         # The artifact root is the common parent of the uploaded paths (outputs/), so payloads
-        # arrive as step2_artifacts/<artifact>/predictions/*.json; ** keeps this layout-independent
-        run: uv run --locked python scripts/04_consolidate.py --predictions-glob 'step2_artifacts/**/predictions/*.json'
+        # arrive as step2_artifacts/<artifact>/predictions/*.json; ** keeps this layout-independent.
+        # Every shard carries an identical copy of the Step 1 model summary; the first one is used.
+        run: >-
+          uv run --locked python scripts/04_consolidate.py
+          --predictions-glob 'step2_artifacts/**/predictions/*.json'
+          --model-summary-glob 'step2_artifacts/**/diagnostics/step1_model_summary.json'
 
       - name: Evaluate Uplift Performance
         run: uv run --locked python -m src.processing.uplift_evaluator
@@ -126,7 +127,7 @@ jobs:
           git push
 
   notify:
-    needs: [step1-matrix, step2-matrix, consolidate-and-commit]
+    needs: [step1, step2-matrix, consolidate-and-commit]
     if: always()
     runs-on: ubuntu-latest
     steps:

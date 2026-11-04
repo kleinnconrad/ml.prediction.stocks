@@ -6,13 +6,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import time
 import random
-import glob
 import logging
 import argparse
-import pandas as pd
 from tqdm import tqdm
 from src.orchestration.logging_setup import configure_logging
-from src.orchestration.steps import run_step2_for_ticker
+from src.orchestration.steps import STEP1_PASSED_PATH, load_step1_passed, run_step2_for_ticker
 
 logger = logging.getLogger(__name__)
 
@@ -32,18 +30,9 @@ def main():
 
     os.makedirs('data/processed', exist_ok=True)
 
-    # 1. Consolidate passing tickers from Action 2 Artifacts
-    shard_csvs = glob.glob('data/state/step1_passed_shard_*.csv')
-    if not shard_csvs:
-        raise FileNotFoundError("No Step 1 CSV artifacts found! Did Action 2 run successfully?")
-
-    all_passed_tickers = []
-    for f in shard_csvs:
-        df = pd.read_csv(f)
-        all_passed_tickers.extend(df['Ticker'].tolist())
-
-    all_passed_tickers = list(set(all_passed_tickers)) # De-duplicate
-    all_passed_tickers.sort() # Ensure deterministic ordering before sharding!
+    # 1. UP tickers of the Step 1 job (de-duplicated and sorted, so the sharding is deterministic);
+    # a header-only file means that no stock is UP
+    all_passed_tickers = load_step1_passed(STEP1_PASSED_PATH)
 
     # 2. Shard for Distributed Execution
     shard_tickers = all_passed_tickers[args.shard :: args.total]

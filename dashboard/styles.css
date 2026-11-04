@@ -221,7 +221,7 @@ tbody tr:hover {
   color: var(--status-red) !important;
 }
 
-/* Progress bar for Accuracy */
+/* Progress bar (Step 1 feature percentiles) */
 .acc-bar-bg {
   width: 100px;
   height: 12px;
@@ -432,35 +432,47 @@ details.stock-variables[open] summary::before {
   word-break: break-word;
 }
 
-/* Confusion Matrix */
-.cm-table {
-  width: 100%;
-  max-width: 300px;
-  border-collapse: collapse;
-  text-align: center;
-  margin-top: 1rem;
-  font-family: inherit;
+/* Step 1 model panel */
+.kpi-detail {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 0.25rem;
 }
 
-.cm-table th, .cm-table td {
-  padding: 0.5rem;
-  border: 1px dashed var(--border-color);
-  font-weight: normal;
+.model-note {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  margin-bottom: 1rem;
 }
 
-.cm-table th {
+.model-facts {
+  margin-bottom: 1.5rem;
+}
+
+.model-tables {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+}
+
+.model-table-wrapper {
+  flex: 1;
+  min-width: 280px;
+  overflow-x: auto;
+}
+
+.model-table-wrapper h4 {
   color: var(--text-muted);
   text-transform: uppercase;
   font-size: 0.85rem;
+  margin-bottom: 0.5rem;
 }
 
-.cm-cell {
-  font-size: 1.2rem;
-  font-weight: bold;
+.model-table th {
+  cursor: default;
 }
-.cm-cell.true-positive, .cm-cell.true-negative {
-  color: var(--status-green);
-}
-.cm-cell.false-positive, .cm-cell.false-negative {
-  color: var(--status-red);
+
+.model-table th, .model-table td {
+  padding: 0.4rem 0.6rem;
+  font-size: 0.85rem;
 }
