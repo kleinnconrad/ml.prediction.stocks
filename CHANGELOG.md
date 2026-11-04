@@ -1,5 +1,16 @@
 # Changelog
 
+## [3.0.0](https://github.com/kleinnconrad/ml.prediction.stocks/compare/v2.1.1...v3.0.0) (2026-11-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* **step1:** Step 1 changes from about 420 per-stock models to one pooled cross-sectional model. The per-stock logistic regressions with ANOVA pre-filter and stepwise selection over about 400 macro and technical features were overfitted (in-sample AUC 0.97, out-of-sample 0.51, the same as on data without macro information). Step 1 now fits one L2 logistic regression on the month-end rows of all stocks with 10 fixed price and volume features ranked within each date. It validates the model by yearly walk-forward refits (out-of-sample cross-sectional AUC 0.56 [0.545, 0.575]) and marks the top 10% of the daily ranking as UP when the lower bound of that interval exceeds 0.5, so UP now means a top-10% rank among all stocks, not a per-stock timing forecast. The ANOVA pre-filter and the stepwise feature selection are dropped: tested honestly on 53 stock-level candidates, neither they nor lasso, elastic net or significance screening beat the fixed features out of sample, and with macro candidates the selection reduced the ranking to chance. Removed: the macro and FRED data pipeline, the per-stock KS cutoffs, CV gates and charts, and the settings features_to_select, anova_k, quantiles, cv_splits, sfs_cv_splits, min_cv_train_rows, min_cv_accuracy and fred_*. New step1_* settings configure the model. The payload field step1_model, the diagnostics key (step1_pooled) and the Step 1 state file (data/state/step1_passed.csv) change. The report gains a top-level step1_model summary. See the README section "Paradigm Change in 3.0.0".
+
+### Features
+
+* **step1:** replace the per-stock models with one pooled cross-sectional model ([7de20b0](https://github.com/kleinnconrad/ml.prediction.stocks/commit/7de20b058054e9d755e96e2c7b02291844796940))
+
 ## [2.1.1](https://github.com/kleinnconrad/ml.prediction.stocks/compare/v2.1.0...v2.1.1) (2026-11-03)
 
 
