@@ -20,7 +20,9 @@ def read_version() -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="Xetra Two-Step Stock Prediction Engine")
-    parser.add_argument("--ticker", type=str, help="Run the model for a single specific ticker (e.g., SAP.DE)", default=None)
+    parser.add_argument("--ticker", type=str, default=None,
+                        help="Rank the qualified universe with the pooled Step 1 model and export only this "
+                             "ticker's payload (e.g., SAP.DE); Step 2 runs if it is UP")
     args = parser.parse_args()
 
     configure_logging(log_file=os.path.join('logs', 'xetra_predictor.log'))
@@ -30,7 +32,7 @@ def main():
     try:
         if args.ticker:
             logger.info(f"Single Ticker Mode activated for: {args.ticker}")
-            run_single({"Ticker": args.ticker, "Company": args.ticker})
+            run_single(args.ticker)
         else:
             logger.info("Batch Mode activated.")
             run_batch()

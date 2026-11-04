@@ -1,25 +1,27 @@
-# Target definition: UP if the close rises by at least `threshold` within `horizon_days` trading days
+# Target definition: UP if the close `horizon_days` trading days later is at least `threshold` above the current close (point to point)
 horizon_days: 126
 threshold: 0.10
 
-# Step 1 model
-features_to_select: 12        # features kept by the Sequential Feature Selector
-anova_k: 40                   # features kept by the ANOVA pre-filter before SFS
-step1_history_years: 10       # training window of the Step 1 model
-feature_warmup_years: 2       # extra history fetched so rolling features (up to 504 days) are populated from the first training day
-quantiles: 10                 # bins of the lift chart
-cv_splits: 2                  # expanding-window CV folds used to validate the model
-sfs_cv_splits: 5              # CV folds used inside the Sequential Feature Selector
-min_cv_train_rows: 126        # minimum rows of the first training fold after purging `horizon_days`
-min_cv_accuracy: 0.65
+# Step 1 model: one pooled cross-sectional logistic regression for all stocks (src/modeling/step1_pooled.py)
+step1_features: [ret_21, ret_63, ret_126, mom_12_1, dist_sma50, dist_sma200, vol_21, vol_126, log_traded_value, drawdown_252]  # each rank-transformed within each date
+step1_history_years: 10              # training window of the final model and of every validation refit
+feature_warmup_years: 2              # extra price history fetched before the training window; the 252-day features need one year
+step1_l2_c: 0.1                      # inverse L2 regularization strength of the logistic regression
+step1_solver_tol: 1.0e-8             # convergence tolerance of the lbfgs solver
+step1_max_iter: 1000                 # iteration limit of the lbfgs solver
+step1_up_share: 0.10                 # share of the ranked stocks marked UP on the scoring date
+step1_min_price_eur: 1.0             # eligibility: stocks at or below this price are not ranked (not the dashboard filter min_price_eur)
+step1_ffill_limit_days: 5            # a day without a trade carries the stock's last trading day for at most this many days
+step1_validation_years: 8            # calendar years of the walk-forward validation, ending with the year of the scoring date
+step1_min_stocks_per_date: 30        # dates with fewer validation rows are left out of the per-date AUC
+step1_bootstrap_block_months: 6      # block length (consecutive month-ends) of the moving-block bootstrap
+step1_bootstrap_replications: 2000   # bootstrap replications of the mean per-date AUC
+step1_bootstrap_seed: 0              # random seed of the bootstrap
+step1_min_validation_auc_lower: 0.5  # model gate: no stock is UP unless the lower 95% CI bound of the validation AUC exceeds this value
 
-# Calendar days between a FRED observation date and its (conservative) publication date
-fred_publication_lag_days:
-  daily: 1
-  weekly: 7
-  monthly: 60
-  quarterly: 150
-fred_max_staleness_days: 400  # series without a newer observation are treated as discontinued
+# Price download of Step 1
+price_download_batch_size: 60        # tickers per yfinance batch request
+price_download_retries: 3            # re-downloads of the tickers that came back without data
 
 # Step 2 ruleset
 min_step2_score: 7                # rules to pass out of 10, pro-rated to the applicable rules

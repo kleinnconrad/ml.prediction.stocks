@@ -75,3 +75,29 @@ def test_prediction_files_are_found_in_every_artifact_layout(tmp_path):
     found = find_prediction_files(str(tmp_path / 'step2_artifacts' / '**' / 'predictions' / '*.json'))
 
     assert found == sorted([a, b])
+
+
+def test_the_model_summary_is_published_as_the_step1_model_key(tmp_path):
+    from src.orchestration.report import build_report
+
+    summary = {'model': 'pooled_cross_sectional_logit', 'gate': {'passed': True}}
+    now = datetime(2026, 11, 4, 1, 30, tzinfo=timezone.utc)
+    assert 'step1_model' not in build_report([], {}, now)
+    publish_report([{'stock_name': 'AAA', 'final_prediction': 'UP'}], {'history_retention_days': 200},
+                   str(tmp_path), now=now, step1_model_summary=summary)
+
+    report = json.loads((tmp_path / 'full_batch_report.json').read_text())
+    assert report['step1_model'] == summary
+    assert list(report) == ['execution_date', 'parameters', 'step1_model', 'predictions']
+    archived = json.loads((tmp_path / 'history' / '2026-11' / 'report_2026-11-04.json').read_text())
+    assert archived['step1_model'] == summary
+
+
+def test_the_first_model_summary_of_the_artifacts_is_used(tmp_path):
+    from src.orchestration.report import load_model_summary
+
+    pattern = str(tmp_path / 'step2_artifacts' / '**' / 'diagnostics' / 'step1_model_summary.json')
+    assert load_model_summary(pattern) is None
+    _write(tmp_path / 'step2_artifacts' / 'step2-final-shard-1' / 'diagnostics' / 'step1_model_summary.json', {'shard': 1})
+    _write(tmp_path / 'step2_artifacts' / 'step2-final-shard-0' / 'diagnostics' / 'step1_model_summary.json', {'shard': 0})
+    assert load_model_summary(pattern) == {'shard': 0}
