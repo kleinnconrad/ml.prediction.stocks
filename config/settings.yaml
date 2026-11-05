@@ -4,13 +4,15 @@ threshold: 0.10
 
 # Step 1 model: one pooled cross-sectional logistic regression for all stocks (src/modeling/step1_pooled.py)
 step1_features: [ret_21, ret_63, ret_126, mom_12_1, dist_sma50, dist_sma200, vol_21, vol_126, log_traded_value, drawdown_252]  # each rank-transformed within each date
+step1_features_adopted: "2026-11-05"  # date on which step1_features was adopted (keep the quotes); later test dates are fresh evidence of the variable review, and the reviews after it count toward m_cum
 step1_history_years: 10              # maximum training window of the final model and of each validation refit (the early refits get fewer years)
-feature_warmup_years: 2              # extra price history fetched before the training window; the 252-day features need one year
+feature_warmup_years: 2              # extra price history fetched before the training window; the 252-day features need one year, the 504-day candidates of the variable review two
 step1_l2_c: 0.1                      # inverse L2 regularization strength of the logistic regression
 step1_solver_tol: 1.0e-8             # convergence tolerance of the lbfgs solver
 step1_max_iter: 1000                 # iteration limit of the lbfgs solver
 step1_up_share: 0.10                 # share of the ranked stocks marked UP on the scoring date
 step1_min_price_eur: 1.0             # eligibility: stocks at or below this price are not ranked (not the dashboard filter min_price_eur)
+step1_min_history_days: 253          # eligibility: stocks with fewer own trading days up to the date are not ranked
 step1_ffill_limit_days: 5            # a day without a trade carries the stock's last trading day for at most this many days
 step1_validation_years: 8            # calendar years of the walk-forward validation, ending with the year of the scoring date
 step1_min_stocks_per_date: 30        # dates with fewer validation rows are left out of the per-date AUC
@@ -22,6 +24,27 @@ step1_min_validation_auc_lower: 0.5  # model gate: no stock is UP unless the low
 # Price download of Step 1
 price_download_batch_size: 60        # tickers per yfinance batch request
 price_download_retries: 3            # re-downloads of the tickers that came back without data
+market_index_ticker: "^GDAXI"        # market index downloaded with the prices: input of the market-relative features, never ranked
+
+# Quarterly variable review: champion-challenger test of the Step 1 feature set (scripts/05_review_variables.py)
+review_candidate_features: all       # candidate pool: 'all' (every feature of the registry) or a list of feature names
+review_validation_years: 8           # calendar years of the walk-forward comparison, ending with the year of the last trading day before the review date
+review_inner_splits: 3               # maximum number of inner validation blocks of a selection procedure
+review_inner_validation_months: 24   # month-ends per inner validation block; each block is preceded by a label-end purge
+review_inner_min_train_months: 12    # minimum number of inner training month-ends before the first inner validation block
+review_anova_k: 40                   # stepwise: candidates kept by the ANOVA prefilter, refitted in each inner training split
+review_stepwise_min_gain: 0.002      # stepwise: stop when no addition raises the inner mean per-date AUC by at least this
+review_max_features: 15              # stepwise: maximum number of selected features
+review_lasso_c_grid: [0.0003, 0.001, 0.003, 0.01, 0.03, 0.1]  # lasso: inverse L1 strengths, one is chosen on the inner splits
+review_lasso_max_features: 40        # lasso: if more coefficients are nonzero, the largest absolute ones are kept
+review_lasso_seed: 0                 # lasso: random_state of liblinear (coordinate order), fixed for reproducible selections
+review_fm_t_hurdle: 3.0              # fm_screen: minimum absolute Newey-West t-statistic of the mean rank correlation
+review_fm_nw_lag: 6                  # fm_screen: Newey-West lags in month-ends
+review_manual_sets: {}               # optional fixed challengers: name -> list of feature names
+review_auc_hurdle: 0.015             # switch rule (a): minimum historical mean AUC gain of a challenger over the champion
+review_family_alpha: 0.05            # switch rule (b): family error rate; the CI level is 1 - review_family_alpha / m_cum, the challenger comparisons since step1_features_adopted including this review
+review_min_winning_years: 6          # switch rule (c): minimum number of test years in which the mean per-date AUC gain is positive
+review_fresh_check_min_dates: 6      # switch rule (d): test dates after step1_features_adopted needed before the fresh evidence is checked
 
 # Step 2 ruleset
 min_step2_score: 7                # rules to pass out of 10, pro-rated to the applicable rules

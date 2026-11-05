@@ -8,6 +8,7 @@
 - [Paradigm Change in 3.0.0: From Per-Stock Models to One Pooled Model](#paradigm-change-in-300-from-per-stock-models-to-one-pooled-model)
 - [Architecture Diagram](#architecture-diagram)
 - [The variable set](#the-variable-set)
+- [Quarterly Variable Review](#quarterly-variable-review)
 - [Execution Guide](#execution-guide)
 - [Configuration](#configuration)
 - [Testing](#testing)
@@ -32,15 +33,16 @@ The pipeline runs as scheduled GitHub Actions workflows:
    - **Step 2 (Company Fundamentals, three parallel runners):** The UP stocks are checked against a deterministic ruleset on their latest financial statements. Passing stocks become buy candidates (`UP_FINAL_BUY`).
    - **Consolidation:** Merges the Step 2 shard outputs into the batch report together with the Step 1 model summary, archives it, evaluates the uplift of earlier predictions and commits the results.
 3. **`Deploy Dashboard to GitHub Pages`**: Publishes the dashboard after every successful pipeline run.
+4. **`5. Quarterly Variable Review`** (03:17 UTC on the 1st of February, May, August and November): Tests whether feature sets chosen by fixed selection procedures from a pool of 237 candidates rank the stocks better than the current `step1_features`. It commits a report and, only if the switch rule holds, opens a pull request that changes the feature list (see [Quarterly Variable Review](#quarterly-variable-review)).
 
 ### Step 1: Pooled Cross-Sectional Model (Machine Learning)
 **Model:** Complete pooling: one L2-regularized logistic regression with one shared intercept and shared coefficients for all stocks (`C` = 0.1 (`step1_l2_c`), lbfgs solver with tolerance 1e-8 and at most 1000 iterations, no class weights). Partial pooling, with stock-specific deviations from the shared coefficients, was evaluated for this release and did not improve the validation; it is not implemented.
 
-**Inputs:** The features in `step1_features` (see [The variable set](#the-variable-set)), each converted to its percentile rank among the eligible stocks of the same date, minus 0.5. The model therefore compares stocks with each other on a date; it does not forecast the direction of the market.
+**Inputs:** The features in `step1_features` (see [The variable set](#the-variable-set)), each converted to its percentile rank among the eligible stocks of the same date, minus 0.5. The model therefore compares stocks with each other on a date; it does not forecast the direction of the market. An eligible stock without a value of a feature (for example, a 504-day feature of a stock with 300 trading days) gets the neutral rank 0, the rank of the median stock.
 
 **Target:** A row is positive if the close 126 trading days later (`horizon_days`) is at least 10% (`threshold`) above the current close, point to point on adjusted closes.
 
-**Eligibility:** A stock is ranked on a date if all features are present, its 126-day traded value is positive and its price is above €1 (`step1_min_price_eur`). This price limit is separate from the €10 dashboard filter (`min_price_eur`).
+**Eligibility:** A stock is ranked on a date if it has at least 253 own trading days up to that date (`step1_min_history_days`), its 126-day traded value is positive, its price is above €1 (`step1_min_price_eur`) and its last trade is at most 5 days old (`step1_ffill_limit_days`). The rule does not depend on the feature list, so a feature set with longer windows does not shrink the universe; for the default features it gives the same eligible stocks as requiring every feature, because their longest window needs 253 trading days. The price limit is separate from the €10 dashboard filter (`min_price_eur`).
 
 **Training data:** The month-end rows (last trading day of each month) of all eligible stocks in the last 10 years (`step1_history_years`) whose 126-day forward return ended before the scoring date. The scoring date is the last closed trading day.
 
@@ -60,7 +62,7 @@ Every stock with price data gets a `step1_model.status`:
 |---|---|
 | `ok` | Ranked; the model gate passed. UP if the rank is within the top share. |
 | `model_gate_failed` | The model gate failed: NOT_UP. The stock is ranked unless no final model could be fitted. |
-| `not_eligible: insufficient_history` | A feature is missing (the longest window needs 253 trading days). |
+| `not_eligible: insufficient_history` | Fewer than `step1_min_history_days` (253) own trading days up to the scoring date. |
 | `not_eligible: price_at_or_below_min` | The price is at or below `step1_min_price_eur`. |
 | `not_eligible: no_traded_value` | The 126-day traded value is zero. |
 | `not_eligible: stale_price` | The last trade is more than `step1_ffill_limit_days` trading days old. |
@@ -268,7 +270,7 @@ A power test planted realistic stock-specific momentum effects. Partial pooling 
 
 Data-driven selection of predictors from a large set of candidates was a core element of the earlier design. It was tested in the pooled model before it was dropped.
 
-The test compared the following on 53 point-in-time stock-level candidates (returns over 5 to 252 days, momentum variants, trends, 52-week high and low, volatility, skewness, beta, idiosyncratic volatility, liquidity and Amihud illiquidity, among others):
+The test compared the following on 53 stock-level candidates (returns over 5 to 252 days, momentum variants, trends, 52-week high and low, volatility, skewness, beta, idiosyncratic volatility, liquidity and Amihud illiquidity, among others; all point in time except the log price, which was later found to depend on later stock splits, see [Candidate Pool](#candidate-pool)):
 - the 10 pre-specified features;
 - the earlier ANOVA plus forward stepwise selection, done honestly:
   - re-run inside every training window;
@@ -302,15 +304,15 @@ The selection step was repeated in every validation year, so the results include
 
 **What remains open:**
 - The feature list is a setting (`step1_features`).
-- Elastic net over a pre-registered set of stock-level candidates can be evaluated as a challenger on data after the release. It should replace the fixed set only if it gains more than about 0.015 AUC out of sample.
+- Elastic net over a pre-registered set of stock-level candidates can be evaluated as a challenger on data after the release. It should replace the fixed set only if it gains more than about 0.015 AUC out of sample. The [Quarterly Variable Review](#quarterly-variable-review) runs this test every three months.
 - Candidates from other data sources, such as fundamentals, were not part of the test.
 
 ### What the Pooled Model Does
 
 Each daily run of Step 1 does the following:
-1. Downloads adjusted daily closes and volumes of all qualified stocks.
+1. Downloads adjusted daily prices (open, high, low, close) and volumes of all qualified stocks and the DAX index.
 2. Computes 10 features per stock on its own trading days: returns over 21, 63 and 126 days, 12-month momentum without the last month (Jegadeesh and Titman, 1993), distances to the 50- and 200-day averages, volatility over 21 and 126 days, the log of the 126-day traded value, and the distance to the 52-week high.
-3. Ranks each feature against the eligible stocks of the same date. A stock is eligible if all its features exist, its price is above EUR 1 and it traded.
+3. Ranks each feature against the eligible stocks of the same date. A stock is eligible if it has traded on at least 253 days, its price is above EUR 1, its 126-day traded value is positive and its last trade is at most 5 days old.
 4. Validates the model by yearly walk-forward refits over the last 8 years.
    - Each refit uses only training rows whose 126-day outcome ended before its test year begins, at most 10 years of them.
    - The download covers 12 years, so the refits of the first test years have fewer training years than the final model.
@@ -333,7 +335,7 @@ In a falling market the top 10% can lose money, only less than the rest, or not 
 
 **Limitations:**
 - **Survivorship bias.** The data contain only stocks listed today. Delisted, merged and insolvent companies are missing. This can inflate both the base rate and the measured edge. Its size could not be measured without delisting data.
-- **Dividend-adjusted price levels.** The closes are adjusted for dividends (`auto_adjust=True` in yfinance), so a past close also reflects the dividends paid after that date. Returns, moving-average distances, volatilities and the target are ratios of closes, in which this adjustment cancels out. The EUR 1 eligibility filter and the traded value, however, use price levels, which at past dates depend on later dividends. In a check on 59 stocks over 114 month-ends, the percentile of the traded value moved by 0.6 points on average (at most 8.7), with a rank correlation of at least 0.996.
+- **Adjusted price levels.** The closes are adjusted for splits and dividends (`auto_adjust=True` in yfinance), so a past close also reflects the splits and dividends after that date. Returns, moving-average distances, volatilities and the target are ratios of closes, in which this adjustment cancels out. Price levels do not: a later split divides all earlier closes by its ratio. The EUR 1 eligibility filter therefore compares past prices that depend on later splits and dividends. The traded value (close x volume) depends on later dividends only, because the volumes are adjusted for splits in the opposite direction. In a check on 59 stocks over 114 month-ends, the percentile of the traded value moved by 0.6 points on average (at most 8.7), with a rank correlation of at least 0.996. For the same reason, no price level is a candidate of the variable review (see [Candidate Pool](#candidate-pool)).
 - **Reuse of the test period.** The years 2019-2026 were used for many design comparisons, so the figures above are not a clean holdout estimate. Live results after the release are the confirmatory test. Published return predictors also tend to weaken after publication.
 - **Costs and liquidity.** Costs were modeled only as assumptions per liquidity group. The edge is weaker in the more liquid half of the market. A monthly rebalanced top-share portfolio trades several dozen orders per month, so fixed per-order fees matter for small portfolios.
 - **Power.** The 126-day design can detect an AUC of about 0.52 against chance. Smaller effects, and small differences between designs, cannot be told apart from noise.
@@ -395,7 +397,7 @@ graph LR
 
 ## The variable set
 
-Step 1 downloads the adjusted daily closes and volumes of all qualified stocks in batches of 60 tickers (`price_download_batch_size`), covering the training window plus warm-up (`step1_history_years` + `feature_warmup_years` = 12 years). Tickers that come back without data are requested again up to 3 times (`price_download_retries`); tickers without any data get no payload and are listed in `step1_model.cross_section.no_price_data`. The same price data feed the features, the eligibility and the target; no macroeconomic series are used.
+Step 1 downloads the adjusted daily opens, highs, lows, closes and volumes of all qualified stocks in batches of 60 tickers (`price_download_batch_size`), covering the training window plus warm-up (`step1_history_years` + `feature_warmup_years` = 12 years). The DAX (`^GDAXI`, `market_index_ticker`) is downloaded with the batches; it is an input of the market-relative features of the registry, never a ranked stock, and it does not add days to the calendar of the stocks. Tickers that come back without data are requested again up to 3 times (`price_download_retries`); tickers without any data get no payload and are listed in `step1_model.cross_section.no_price_data`. The same price data feed the features, the eligibility and the target; no macroeconomic series are used.
 
 ### Step 1 Features (Price and Volume)
 Every feature is computed per stock on the stock's own trading days (the days on which it has a close):
@@ -411,9 +413,11 @@ Every feature is computed per stock on the stock's own trading days (the days on
 
 **Alignment:** The stocks' rows are placed on the union calendar of all downloaded trading days. A day without a trade carries the stock's last trading day for at most 5 days (`step1_ffill_limit_days`); after that the stock is not eligible (`stale_price`).
 
-**Within-date ranks:** On every date, each feature of the eligible stocks is converted to its percentile rank among them (`rank(pct=True, method='average')` in pandas: ties share their average rank) minus 0.5, so every model input lies between -0.5 and 0.5 and a median stock has 0. The payload reports these positions as `feature_percentiles` (0 to 100) and the product of each coefficient and rank value as `logit_contributions`, the feature's contribution to the log-odds relative to a median stock.
+**Eligibility:** A stock is ranked on a date if it has at least 253 own trading days up to the date (`step1_min_history_days`), a positive 126-day traded value, a price above €1 (`step1_min_price_eur`) and a last trade at most 5 days old. The rule is the same for every feature list.
 
-**Feature list:** The model reads the list from `step1_features` in `config/settings.yaml`. Every name must exist in the feature registry (`FEATURE_FUNCTIONS` in `src/processing/features.py`); unknown names stop the run with an error. `docs/feature_engineering.sql` shows the same computation in SQL.
+**Within-date ranks:** On every date, each feature of the eligible stocks is converted to its percentile rank among the eligible stocks that have a value (`rank(pct=True, method='average')` in pandas: ties share their average rank) minus 0.5, so every model input lies between -0.5 and 0.5 and a median stock has 0. An eligible stock without a value of a feature, or with a non-finite value, gets the neutral rank 0. The payload reports these positions as `feature_percentiles` (0 to 100; 50 for a missing value, whose raw value in the diagnostics is `null`) and the product of each coefficient and rank value as `logit_contributions`, the feature's contribution to the log-odds relative to a median stock (0 for a missing value).
+
+**Feature list:** The model reads the list from `step1_features` in `config/settings.yaml` and computes only these features. Every name must exist in the feature registry (`FEATURE_FUNCTIONS` in `src/processing/features.py`): 237 features in 15 families, the candidate pool of the [Quarterly Variable Review](#quarterly-variable-review). Unknown names stop the run with an error. A list with market-relative features stops the run with an error if the DAX did not download. `step1_features_adopted` records the date on which the list was adopted. `docs/feature_engineering.sql` shows the computation of the 10 default features in SQL; `docs/generate_sql.py` has SQL templates only for these features, and the variable review does not regenerate the file.
 
 ### Step 2 Variables (Company Fundamentals)
 If a stock reaches Step 2, its financial statements are read from the local cache (`data/raw/fundamentals/`) and filtered against a predefined `FUNDAMENTAL_UNIVERSE` so that only accounting rows enter the ruleset.
@@ -427,10 +431,151 @@ The engine also extracts metrics that are shown on the dashboard but are not use
 
 * **P/E Ratio (KGV):** $\text{P/E} = \frac{\text{Current Stock Price}}{\text{Earnings Per Share (EPS)}}$. A high P/E can mean that the price is high relative to earnings or that investors expect high growth; a low P/E can indicate a low price relative to earnings.
   * **Note on Dimensionality:** The P/E ratio is a point-in-time snapshot rather than a continuous, stationary time series and is only refreshed by Yahoo Finance from time to time. It is therefore not used as a predictor in Step 1.
-* **Beta Factor:** $\beta = \frac{\text{Covariance}(R_s, R_m)}{\text{Variance}(R_m)}$. Volatility of the stock relative to the market. A beta greater than 1 indicates higher volatility than the market. Beta is not used as a predictor because of its collinearity with the stock's own volatility and its nature as a static snapshot.
+* **Beta Factor:** $\beta = \frac{\text{Covariance}(R_s, R_m)}{\text{Variance}(R_m)}$. Volatility of the stock relative to the market. A beta greater than 1 indicates higher volatility than the market. This snapshot is not used as a predictor because of its collinearity with the stock's own volatility and its nature as a static snapshot. The candidate pool of the [Quarterly Variable Review](#quarterly-variable-review) contains betas computed from the downloaded prices (`beta_63` to `beta_504`); they are not part of the default `step1_features`.
 * **Liquidity (Avg Daily Traded Value):** $\text{Liquidity (€M)} = \frac{\text{Average Daily Volume} \times \text{Latest Stock Price}}{1,000,000}$. An estimate of the average value traded per day. Low liquidity means that large orders can move the price (slippage); values below €0.5M are flagged. This snapshot is not used by either step; Step 1 computes its own traded-value feature from the downloaded prices and volumes (`log_traded_value`).
 
 **Price filter:** Stocks priced at or below €10 (`min_price_eur`) are hidden from all KPIs and tables of the dashboard and excluded from the uplift evaluation, where a single illiquid penny stock could otherwise dominate a cohort average. The "Suppressed" KPI shows how many stocks are hidden and how many of them are buy candidates. The batch report and `final_buy_signals.csv` still include all stocks. The Step 1 ranking covers every stock above €1 (`step1_min_price_eur`), so the ranks shown on the dashboard (`rank / n_ranked`) have gaps.
+
+---
+
+## Quarterly Variable Review
+
+Every three months, the workflow `5. Quarterly Variable Review` (`scripts/05_review_variables.py`, `src/modeling/variable_review.py`) checks whether a different feature set ranks the stocks better than the current `step1_features`. The current list is the champion. The challengers are the lists that fixed selection procedures choose from a pre-registered pool of 237 candidates. A challenger replaces the champion only if the switch rule holds, and only after the user merges the pull request that the workflow opens. Nothing switches without that merge.
+
+```mermaid
+graph LR
+    A[Prices of the qualified stocks and the DAX] --> B[Month-end panel of 237 candidates]
+    B --> C[Champion: step1_features]
+    B --> D[Procedures re-run in every training window]
+    C --> E[Production model on the same test rows]
+    D --> E
+    E --> F{Switch rule a to e}
+    F -->|No| G[keep: report committed to main]
+    F -->|Yes| H[switch: report committed to main and a pull request that changes step1_features]
+    H --> I{Merged by the user?}
+    I -->|Yes| J[New feature list from the next pipeline run]
+    I -->|No| K[Current list stays]
+```
+
+### Why the Review Needs a Switch Rule
+
+The tests before release 3.0.0 (study E6, see [Why the Stepwise Feature Selection Was Dropped](#why-the-stepwise-feature-selection-was-dropped)) set the conditions for a review:
+- Honest stepwise selection from 53 candidates changed the cross-sectional AUC by -0.008 [-0.016, +0.005] against the 10 fixed features, and elastic net by +0.004 [-0.003, +0.015].
+- The selected sets changed from year to year.
+- With about 90 test dates, differences below about 0.015 AUC cannot be told apart from noise.
+
+A review that compares several challengers on the same history every quarter would switch whenever one of them is ahead by chance. The pool and the procedures are fixed in advance, and the walk-forward comparison re-runs every selection inside each training window, so the comparison includes the optimism of the selection. What remains is the repeated look at the same history. The switch rule therefore asks for a minimum gain, an interval corrected for every comparison made on that history since the current list was adopted, a gain in at least 6 of the 8 test years, and fresh evidence that does not contradict.
+
+### Candidate Pool
+
+The pool is the content of the feature registry (`FEATURE_FUNCTIONS` in `src/processing/features.py`) at review time, unless `review_candidate_features` lists names. Every feature is computed per stock on its own trading days from trailing windows only. The inputs are the stock's open, high, low, close and volume and the close of the DAX (`^GDAXI`, `market_index_ticker`) on or before each of the stock's trading days. The pool contains 52 of the 53 candidates of E6 under their E6 names and definitions. The log price of E6 is left out because it is not point in time: the downloaded closes are adjusted for later splits, so a past price level depends on splits that happened after that date (see [Expected Performance and Limitations](#expected-performance-and-limitations)). On the month-end rows of the review data, the per-date AUC of the log price was 0.495 with adjusted closes and 0.510 with the closes of the time; the part of the adjustment due to later splits alone reached 0.483 [0.476, 0.490], because stocks that split later had often risen before. A missing or non-finite value is missing; in an eligible row it gets the neutral rank 0.
+
+| Family | Features | Windows (trading days unless stated) |
+|---|---|---|
+| Returns | 10 | 1, 5, 10, 21, 42, 63, 84, 126, 189, 252 |
+| Momentum with a skip window | 8 | 12-1, 12-2, 12-3, 9-1, 6-1, 3-1, 12-6 and 24-12 months (24-12 is the long-term reversal and needs 505 days) |
+| Distance to the SMA | 7 | 10, 20, 50, 100, 150, 200, 250 |
+| SMA crossovers | 8 | 5/20, 10/20, 10/50, 20/50, 20/100, 50/200, 20/200, 100/200 |
+| SMA slopes | 8 | SMA 20 over 5 and 21 days; SMA 50, 100 and 200 over 21 and 63 days |
+| Highs and lows | 29 | Distance to the high and to the low (10 to 504), position in the range (21 to 504), days since the high and the low (63 to 252), maximum drawdown and Ulcer index (63 to 252) |
+| Volatility | 24 | Standard deviation of returns (5 to 252), downside and upside volatility (21 to 252), seven volatility ratios, volatility of the 21-day volatility (126 and 252) |
+| Range-based volatility | 13 | Parkinson and Garman-Klass (10 to 126), mean (high - low) / close (5 to 126) |
+| Higher moments | 20 | Skewness and kurtosis (21 to 252), largest and smallest daily return (5 to 252) |
+| Market-relative (DAX) | 26 | Beta (63 to 504), correlation, idiosyncratic volatility, downside and upside beta, R-squared, residual momentum 12-1 and 6-1, return minus index return (5 to 252) |
+| Liquidity and volume | 28 | Log traded value (5 to 252), Amihud illiquidity (10 to 252), share of zero-return and zero-volume days, volume trends, coefficient of variation of the volume |
+| Trend quality | 20 | R-squared and t-statistic of a log-price trend (21 to 252), share of up days, information discreteness (63 to 252), return autocorrelation |
+| Overnight and intraday | 8 | Mean overnight and intraday return (5 to 126) |
+| Oscillators | 26 | RSI 7 to 28, stochastic %K 14 and 28 and %D 14, Williams %R 14, MACD line, signal and histogram (12/26/9, divided by the close), Bollinger %B and bandwidth (20, 50), CCI (20, 50), money flow index (14, 28), Chaikin money flow (21, 63), on-balance-volume slope (21 to 126), ADX (14, 28) |
+| Seasonality | 2 | Return of the coming calendar month one and two years earlier |
+
+The docstrings in `src/processing/features.py` define every family. Williams %R 14 and stochastic %K 14 differ by a constant and therefore have identical ranks.
+
+### Selection Procedures
+
+Each procedure maps the training rows of a window (month-end rows, within-date ranks, labels) to a feature list. The production model (L2 logistic regression, `step1_l2_c`) is then fitted on that list.
+
+| Procedure | Selection |
+|---|---|
+| `stepwise` | The stepwise selection of releases up to 2.x, done honestly: inner validation blocks by date with a label-end purge, an ANOVA prefilter (`review_anova_k` = 40) refitted inside every inner training split, and forward selection on the mean per-date AUC of the validation blocks. It stops when no addition raises that AUC by at least 0.002 (`review_stepwise_min_gain`) or at 15 features (`review_max_features`). |
+| `lasso` | L1 logistic regression over the whole pool (liblinear). The penalty is chosen from `review_lasso_c_grid` on the same inner splits by the mean per-date AUC of the production model refitted on the nonzero coefficients (relaxed lasso). At most 40 features are kept (`review_lasso_max_features`, the largest absolute coefficients); the report states when the limit applied. |
+| `fm_screen` | Fama-MacBeth screening: the correlation of each candidate's rank with the label on every training date, kept if the absolute Newey-West t-statistic (6 lags, `review_fm_nw_lag`) of its mean exceeds 3.0 (`review_fm_t_hurdle`, Harvey, Liu and Zhu, 2016). |
+| `all_candidates` | The whole pool without selection; a reference. |
+| `manual:<name>` | Fixed lists from `review_manual_sets`; none by default. |
+
+The inner splits are up to 3 expanding blocks (`review_inner_splits`) of 24 month-ends (`review_inner_validation_months`), each preceded by a label-end purge, with at least 12 inner training month-ends (`review_inner_min_train_months`). If even one block of 24 month-ends leaves fewer, a single shorter block is used. If `stepwise`, `lasso` or `fm_screen` select nothing, they return the champion list. All procedures are deterministic for given data and settings.
+
+### Evaluation and Switch Rule
+
+**Walk-forward:** The review uses the protocol of the production validation: yearly test blocks over the last 8 calendar years (`review_validation_years`) up to the year of the last trading day, training rows whose label ended before the first test date of the year, at most 10 years (`step1_history_years`) of them, and test rows with known labels. The champion keeps its list. Every challenger re-runs its procedure inside every training window, so the comparison includes the optimism of the selection itself. All lists are scored with the production model on exactly the same test rows. The final list of a procedure is its selection on the training rows of the production model on the review date.
+
+**Per test date:** the cross-sectional AUC (dates with at least 30 stocks, `step1_min_stocks_per_date`), the hit rate of the top 10% (`step1_up_share`), the base rate and the mean forward return of the top share minus that of all ranked stocks.
+
+**Paired comparison:** d = AUC of the challenger minus AUC of the champion on each test date.
+- Historical: the mean d over all test dates with a moving-block bootstrap interval (`step1_bootstrap_*` settings) at the Bonferroni-corrected two-sided level 1 - 0.05 / m_cum (`review_family_alpha`; m_cum is explained below), and the mean d of every test year.
+- Fresh: the test dates after `step1_features_adopted`. They did not exist when the champion and the procedures were fixed, so only they are a confirmatory test.
+- Hit rate: the top-share hit rate of the challenger and of the champion, pooled over all test dates and over the fresh dates.
+
+**Switch rule:** A challenger qualifies if all of these hold:
+
+| Condition | Threshold |
+|---|---|
+| (a) Historical mean d | at least 0.015 (`review_auc_hurdle`) |
+| (b) Lower bound of the historical interval at the level 1 - 0.05 / m_cum | above 0 |
+| (c) Test years in which the mean d is positive | at least 6 (`review_min_winning_years`) of the test years that have test dates |
+| (d) Fresh evidence | once 6 fresh test dates exist (`review_fresh_check_min_dates`): fresh mean d at least 0 and a fresh top-share hit rate not below the champion's. With fewer fresh dates the check is reported as not yet available and does not block a switch. |
+| (e) Top-share hit rate on all test dates | not below the champion's |
+
+Its final list must also differ from the champion. If several challengers qualify, the largest corrected lower bound wins (then the larger historical mean d, then the order of the procedures), and its final list is proposed. Otherwise the decision is keep, and the report lists the conditions each challenger failed, m_cum and the CI level. In the February and May reviews, the current calendar year has no test date with a known label yet, so (c) counts the 7 earlier test years.
+
+**Accuracy of the corrected interval:** The interval is the percentile block bootstrap of the production validation (2000 replications, blocks of 6 month-ends). At the corrected levels it is approximate, and its coverage is lower than the nominal level. Its lower bound rests on a few replications (about the 12th smallest of 2000 at 98.75% and the 3rd at 99.69%), and all test dates of a year share one selected list and one refit, a dependence that is longer than the blocks. The hurdle (a), the stability condition (c) and the hit-rate condition (e) therefore carry part of the protection against noise. The table shows how often a challenger without a true gain met condition (b) alone and conditions (a) to (c) together in 4000 simulated series per row. Each series has 88 test dates in the layout of the test run (seven test years of 12 dates and one of 4), a true mean d of 0, the per-date spread of the test run, dates correlated over about three months and, in two rows, a random shift shared by all dates of a test year, as a selected list and a refit are:
+
+| Simulated challenger | (b), m_cum = 4 | (a) to (c), m_cum = 4 | (b), m_cum = 16 | (a) to (c), m_cum = 16 |
+|---|---|---|---|---|
+| No year shift | 2.2% | 0.27% | 1.2% | 0.25% |
+| Year shift as observed for `stepwise` (standard deviation 0.005) | 3.0% | 0.08% | 1.6% | 0.08% |
+| Year shift as observed for `lasso` (standard deviation 0.013) | 4.3% | 1.1% | 2.6% | 0.9% |
+| Nominal rate per comparison | 0.625% | 0.625% | 0.16% | 0.16% |
+
+At m_cum = 4 the rule as a whole stays below the nominal rate except for the challenger with the largest year shift (1.1% against 0.625%). The hurdle (a) does not tighten with m_cum, so after several reviews a chance switch of such a challenger is up to about six times as likely as the correction states. A challenger without a true gain that passes by chance replaces the current list with one that ranks about as well on average. An interval with one observation per test year and t critical values (7 degrees of freedom) would hold the nominal rate. With the year-to-year spread of the four challengers of the test run, its lower bound would exceed 0 only above a mean gain of 0.009 to 0.023 AUC at m_cum = 4 and 0.012 to 0.030 at m_cum = 16, against the hurdle of 0.015.
+
+### Repeated Reviews and the Earliest Switch
+
+m_cum is the number of challenger comparisons made on the same history since the current list was adopted: the challengers of this review plus those of every earlier review dated after `step1_features_adopted`, counted from the committed reports in `data/processed/variable_reviews/`. A rerun on the same day replaces the report of the earlier run and is not counted twice. The first review with the 4 default challengers uses a 98.75% interval; after four quarterly reviews (16 comparisons) the interval is at 99.69%. Each further look at the same history therefore needs more evidence.
+- **The first review can switch.** The first scheduled review, or a manual run right after the merge, can already switch if a challenger passes. Fresh test dates need 126 trading days to mature: the first one after the adoption on 2026-11-05 (the month-end of November 2026) has a known label in mid-2027, and condition (d) applies from the sixth one on.
+- **Only clear gains switch.** Study E6 could detect differences of about 0.015-0.018 AUC at 80% power for a single comparison, and the evidence needed rises with m_cum.
+- **A switch resets the count.** A switch moves `step1_features_adopted` to the review date, so the next review starts new counts of m_cum and of the fresh dates.
+
+A test run on real data (review date 2026-11-05, prices up to 2026-11-04, m_cum = 4, 98.75% interval) gave a champion AUC of 0.560 [0.542, 0.575], equal to the production validation. No challenger was ahead: the mean d was -0.0115 for `stepwise`, -0.0053 for `lasso`, -0.0050 for `fm_screen` and -0.0163 for `all_candidates`, every corrected interval contained 0 or lay below it, and each challenger was ahead in at most 3 of the 8 test years. All four failed conditions (a), (b), (c) and (e); the fresh check was not yet available. The decision was keep.
+
+### Outputs and Adoption
+
+- **Report:** `data/processed/variable_reviews/review_YYYY-MM-DD.json` and `.md`, committed to `main` by the workflow (`chore: add variable review YYYY-MM-DD`). They contain the pool and its families, the lists selected per test year and the final lists, the AUC per year, the paired results with their intervals and the mean d per year, fresh evidence and hit rates, m_cum with the counted reports and the CI level, the decision with its reasons, the runtime, the peak memory and the parameters. The next reviews count these reports for m_cum.
+- **Switch:** The script sets `step1_features` to the winner's final list and `step1_features_adopted` to the review date. It changes only these two lines of `config/settings.yaml`, so comments and key order are kept. The workflow commits this change to the branch `variable-review/YYYY-MM-DD` and opens a pull request (`feat(step1): adopt the variable set of the review of YYYY-MM-DD (<procedure>)`) whose body summarizes the evidence.
+- **Adoption:** Merging the pull request adopts the list. The next run of `2. Execute Pipeline (Step 1 & 2)` uses it. Closing the pull request keeps the current list.
+- **Output size:** The prediction payloads (`feature_percentiles`, `logit_contributions`), the feature diagnostics and the daily batch report, which is committed and archived, grow about linearly with the number of features. The pull request states the length of the current and the proposed list.
+- **SQL reference:** `docs/feature_engineering.sql` documents the 10 default features and is not regenerated by the review. `docs/generate_sql.py` stops with an error for features without a SQL template in `FEATURE_SQL`.
+- **CI on the pull request:** Pull requests and pushes made with the workflow's `GITHUB_TOKEN` do not start other workflows, so the `CI` workflow does not run on the review's pull request on its own. Close and reopen the pull request, or push a commit to its branch, to run the checks before merging.
+- **Permissions:** The workflow needs `contents: write` and `pull-requests: write` and the repository setting that allows GitHub Actions to create pull requests (Settings, Actions, General, Workflow permissions). Release Please uses the same setting for its release pull requests.
+
+### Running the Review Manually
+
+- **GitHub Actions:** Actions, `5. Quarterly Variable Review`, Run workflow. A manual run commits its report and, on a switch, opens the pull request like a scheduled run. A second run on the same day replaces the report of the first. If the branch `variable-review/YYYY-MM-DD` of a switch already exists, the pull request step stops with an error; close that pull request and delete its branch before running the review again on the same day.
+- **Local:** from the repository root, with `data/state/qualified_tickers.csv` present:
+  ```bash
+  uv run python scripts/05_review_variables.py --n-jobs 4 --price-cache data/price_cache
+  ```
+  | Option | Meaning |
+  |---|---|
+  | `--n-jobs` | Worker processes (default: the number of CPUs) |
+  | `--price-cache DIR` | Reads the prices from CSV files in DIR if they exist, otherwise downloads them and writes them there (`data/` is not committed) |
+  | `--candidates a,b,...` | Replaces the candidate pool, for tests |
+  | `--review-date YYYY-MM-DD` | Review date (default: today in Europe/Berlin); prices from this date on are not used |
+  | `--pr-body FILE`, `--commit-body FILE` | Where a switch writes the pull request body and the commit message body |
+  | `--output-dir DIR` | Directory of the reports (default: `data/processed/variable_reviews`); the earlier reports in it are counted for m_cum |
+
+  A local run that ends with a switch changes `config/settings.yaml` in the working tree.
+
+The test runs on 4 cores took about 50 seconds from a price cache, plus about 40 seconds for the download of 12 years of prices; their processes together used at most about 3.5 GB of memory. The workflow stops after 60 minutes.
 
 ---
 
@@ -469,6 +614,8 @@ The workflows run on their schedules. To run them manually from the "Actions" ta
 2. **Fundamental Caching (manual step)**: Run `scripts/update_fundamentals.py` locally and push the cache (if it is not up to date).
 3. **`2. Execute Pipeline (Step 1 & 2)`**: Runs Step 1 on one runner (`scripts/02_run_step1.py`), which uploads the UP list (`data/state/step1_passed.csv`) and all payloads plus the model summary, runs Step 2 on 3 runners, consolidates the results and commits them. The dashboard deployment starts automatically afterwards.
 
+**`5. Quarterly Variable Review`** runs independently of this order (`scripts/05_review_variables.py`). It commits its report to `main` and, if the switch rule holds, opens a pull request that changes `step1_features`. See [Running the Review Manually](#running-the-review-manually) for a local run.
+
 ### Data Synchronization
 
 The pipeline requires synchronized data retrieval to ensure reproducible predictions between local executions and cloud-based GitHub Actions. The engine standardizes the current date to the `Europe/Berlin` timezone and drops pricing data of the current calendar day. Only fully closed, historical trading candles are used; the scoring date of Step 1 is the last closed trading day.
@@ -485,21 +632,24 @@ All user-defined parameters are defined in `config/settings.yaml` and loaded thr
 | Group | Keys |
 |---|---|
 | Target | `horizon_days`, `threshold` |
-| Step 1 model | `step1_features`, `step1_history_years`, `feature_warmup_years`, `step1_l2_c`, `step1_solver_tol`, `step1_max_iter`, `step1_up_share`, `step1_min_price_eur`, `step1_ffill_limit_days` |
+| Step 1 model | `step1_features`, `step1_features_adopted`, `step1_history_years`, `feature_warmup_years`, `step1_l2_c`, `step1_solver_tol`, `step1_max_iter`, `step1_up_share`, `step1_min_price_eur`, `step1_min_history_days`, `step1_ffill_limit_days` |
 | Step 1 validation and gate | `step1_validation_years`, `step1_min_stocks_per_date`, `step1_bootstrap_block_months`, `step1_bootstrap_replications`, `step1_bootstrap_seed`, `step1_min_validation_auc_lower` |
-| Price download | `price_download_batch_size`, `price_download_retries` |
+| Price download | `price_download_batch_size`, `price_download_retries`, `market_index_ticker` |
+| Quarterly variable review: pool and windows | `review_candidate_features`, `review_validation_years`, `review_inner_splits`, `review_inner_validation_months`, `review_inner_min_train_months` |
+| Quarterly variable review: procedures | `review_anova_k`, `review_stepwise_min_gain`, `review_max_features`, `review_lasso_c_grid`, `review_lasso_max_features`, `review_lasso_seed`, `review_fm_t_hurdle`, `review_fm_nw_lag`, `review_manual_sets` |
+| Quarterly variable review: switch rule | `review_auc_hurdle`, `review_family_alpha`, `review_min_winning_years`, `review_fresh_check_min_dates` |
 | Step 2 ruleset | `min_step2_score`, `min_step2_applicable_rules`, `step2_yoy_tolerance_days`, `min_current_ratio`, `min_annual_roe`, `fundamentals_max_age_days` |
 | Reporting | `history_retention_days`, `uplift_match_tolerance_days`, `min_price_eur` |
 | Company profiles | `gemini_model` |
 | Data source | `xetra_t7_url` |
 
-The line items of the Step 2 financial statements (`FUNDAMENTAL_UNIVERSE`) are defined in `config/universe.py`.
+The line items of the Step 2 financial statements (`FUNDAMENTAL_UNIVERSE`) are defined in `config/universe.py`. The variable review also reuses `step1_l2_c`, `step1_solver_tol`, `step1_max_iter`, `step1_min_stocks_per_date`, `step1_up_share` and the `step1_bootstrap_*` keys, and copies all parameters it used into its report.
 
 ---
 
 ## Testing
 
-The offline unit tests in `tests/` cover the Step 1 features (hand-computed values, point-in-time behavior, labels and the label boundary), the eligibility rules and within-date ranks, the walk-forward validation and its purge, the training window of the final model, the per-date AUC, the block bootstrap, the model gate, the top-share selection, the ineligibility statuses, a run without a final model, the payload schema, a planted signal and pure noise on synthetic universes, the price download (with a mocked yfinance), the Step 2 ruleset, report consolidation, history pruning, the uplift evaluation and the JSON export. They use synthetic data and need no API keys or network access. The model parameters they rely on are pinned in `tests/conftest.py`, so a changed value in `config/settings.yaml` does not break them:
+The offline unit tests in `tests/` cover the Step 1 features (hand-computed values, point-in-time behavior, labels and the label boundary), the candidate pool of the feature registry (every candidate computes, none looks ahead, a hand computation for every family, the default features unchanged), the eligibility rule and within-date ranks with the neutral rank of missing values, the variable review (inner splits and their purge, the selection procedures on a planted signal, the review panel against the production panel, the switch rule condition by condition, the count of earlier comparisons m_cum and the Bonferroni level, the settings update, the report and the workflow script on a synthetic price cache), the stop of a run whose market-relative features lack the market index, the walk-forward validation and its purge, the training window of the final model, the per-date AUC, the block bootstrap, the model gate, the top-share selection, the ineligibility statuses, a run without a final model, the payload schema, a planted signal and pure noise on synthetic universes, the price download (with a mocked yfinance, including the opens, highs, lows, the market index and the CSV price cache), the Step 2 ruleset, report consolidation, history pruning, the uplift evaluation and the JSON export. They use synthetic data and need no API keys or network access. The model parameters they rely on are pinned in `tests/conftest.py`, so a changed value in `config/settings.yaml` does not break them:
 ```bash
 uv run pytest
 ```
@@ -550,13 +700,13 @@ Release Please is triggered automatically via GitHub Actions whenever code is pu
 
 When a `feat:` or `fix:` commit is pushed to `main`, the bot opens a **Release Pull Request**. Once that PR is merged, the release is published and tagged, and the `CHANGELOG.md` and the version in `pyproject.toml` are updated on the `main` branch.
 
-### Update uv.lock before merging a Release Pull Request
-Release Please changes the version in `pyproject.toml` but not in `uv.lock`, which records the project's own version. Every workflow runs `uv run --locked`, so a release merged without a new `uv.lock` breaks CI and the next scheduled pipeline run. Before merging a Release Pull Request:
-1. Check out its branch, run `uv lock` (only the `stock-predictor` version line changes) and check the result with `uv lock --check`.
-2. Commit `uv.lock` as `chore: update uv.lock` and push it to the branch of the Release Pull Request.
-3. Merge once the `CI passed` check succeeds. If Release Please updates the pull request again, repeat steps 1 and 2.
+### uv.lock on the Release Pull Request
+Release Please changes the version in `pyproject.toml` but not in `uv.lock`, which records the project's own version. Every workflow runs `uv run --locked`, so a release merged with a stale `uv.lock` would break CI and the next scheduled pipeline run. The `release-please` workflow therefore updates the lock file itself:
+1. After the release steps, if Release Please created or updated a Release Pull Request (action outputs `prs_created` and `pr`), the workflow checks out the pull request's branch.
+2. It runs `uv lock` and, if `uv.lock` changed, commits it as `chore: update uv.lock for the release` (as `github-actions[bot]`) and pushes it to that branch.
+3. Release Please rewrites (force-pushes) its branch only when it updates the pull request, that is, when a new releasable commit changes the release notes. That happens in a run of this workflow, and the same run adds the lock commit again. Runs of the workflow do not overlap (`concurrency`), so a later run cannot rewrite the branch while an earlier one pushes its lock commit.
 
-If a release was merged without this step, run `uv lock` on a branch from `main` and merge that commit before the next scheduled run of `2. Execute Pipeline (Step 1 & 2)`.
+These steps run after the release and the disclaimer steps, so a failure in them cannot affect a release. The lock commit is pushed with the workflow's `GITHUB_TOKEN`, which does not start the `CI` workflow; to run the checks on the Release Pull Request before merging, close and reopen it. Pushes to `main` with the `GITHUB_TOKEN`, such as the data commits of the pipeline and of the variable review, do not start this workflow either. If a release was ever merged with a stale lock file, run `uv lock` on a branch from `main` and merge that commit before the next scheduled run of `2. Execute Pipeline (Step 1 & 2)`.
 
 ---
 
@@ -565,40 +715,41 @@ If a release was merged without this step, run `uv lock` on a branch from `main`
 Here is the directory layout of the repository and what you can find in each folder:
 
 - **`.devcontainer/`**: Devcontainer configuration (Python 3.12, uv) for reproducible development environments in VS Code or GitHub Codespaces.
-- **`.github/`**: GitHub Actions workflows (T7 download, pipeline, dashboard deployment, CI checks, Release Please) and the Dependabot configuration.
+- **`.github/`**: GitHub Actions workflows (T7 download, pipeline, dashboard deployment, quarterly variable review `05_review_variables.yml`, CI checks, Release Please) and the Dependabot configuration.
 - **`config/`**: Parameters (`settings.yaml`), the settings loader (`settings.py`) and the Step 2 line items (`universe.py`).
 - **`dashboard/`**: HTML/JS/CSS of the dashboard deployed to GitHub Pages.
 - **`data/`**: Data artifacts at various stages of processing:
   - `data/raw/`: The Xetra T7 dump and the fundamentals cache (`fundamentals/`, including `_manifest.json`).
   - `data/state/`: State passed between pipeline steps: `qualified_tickers.csv` (committed) and `step1_passed.csv` (the Step 1 UP tickers; created in the pipeline run and passed to Step 2 as an artifact, not committed).
-  - `data/processed/`: Published outputs (`full_batch_report.json`, `final_buy_signals.csv`, `uplift_report.json`, `company_profiles_cache.json`, `history/`).
-- **`docs/`**: Reference documentation: the SQL translation of the Step 1 feature engineering, eligibility and within-date ranks (`feature_engineering.sql`, generated by `generate_sql.py`).
+  - `data/processed/`: Published outputs (`full_batch_report.json`, `final_buy_signals.csv`, `uplift_report.json`, `company_profiles_cache.json`, `history/`) and the reports of the quarterly variable review (`variable_reviews/review_YYYY-MM-DD.json` and `.md`, committed by the review workflow).
+- **`docs/`**: Reference documentation: the SQL translation of the feature engineering of the 10 default Step 1 features, the eligibility and the within-date ranks (`feature_engineering.sql`, generated by `generate_sql.py`, which has SQL templates for these features only; the variable review does not regenerate it).
 - **`logs/`**: Local log files written by `src/main.py`.
 - **`outputs/`**: Outputs of a run (not committed):
   - `outputs/predictions/`: Full prediction payloads per ticker.
   - `outputs/diagnostics/`: Feature diagnostics per ticker, the Step 1 model summary (`step1_model_summary.json`) and the per-date validation table (`step1_validation_per_date.csv`).
   - `outputs/matrices/`: Fundamentals used by Step 2 per ticker.
-- **`scripts/`**: Entry point scripts for the GitHub Actions runners (`01_run_t7.py`, `02_run_step1.py`, `03_run_step2.py`, `04_consolidate.py`) and maintenance scripts (`update_fundamentals.py`, `generate_dummy_uplift_data.py`).
+- **`scripts/`**: Entry point scripts for the GitHub Actions runners (`01_run_t7.py`, `02_run_step1.py`, `03_run_step2.py`, `04_consolidate.py`, `05_review_variables.py` for the quarterly variable review) and maintenance scripts (`update_fundamentals.py`, `generate_dummy_uplift_data.py`).
 - **`src/`**: The core application logic:
   - `main.py`: Local CLI entry point.
-  - `src/ingestion/`: API connectors (Yahoo Finance batch prices and fundamentals, Xetra T7, Gemini).
-  - `src/processing/`: Ticker qualification, the Step 1 features, eligibility and within-date ranks, and the uplift evaluation.
-  - `src/modeling/`: The Step 1 pooled cross-sectional model with its walk-forward validation and gate, and the Step 2 (Company Fundamentals) ruleset.
+  - `src/ingestion/`: API connectors (Yahoo Finance batch prices with the market index and the CSV price cache, fundamentals, Xetra T7, Gemini).
+  - `src/processing/`: Ticker qualification, the feature registry (the Step 1 features and the candidate pool of the variable review), eligibility and within-date ranks, and the uplift evaluation.
+  - `src/modeling/`: The Step 1 pooled cross-sectional model with its walk-forward validation and gate, the quarterly variable review (`variable_review.py`: selection procedures, paired comparison, switch rule, report and settings update), and the Step 2 (Company Fundamentals) ruleset.
   - `src/orchestration/`: Step 1 and Step 2 runners, report consolidation, JSON export and the local batch runner.
-- **`tests/`**: Offline unit tests (pytest) and their synthetic-data fixtures (`conftest.py`).
+- **`tests/`**: Offline unit tests (pytest) and their synthetic-data fixtures (`conftest.py`), including the tests of the feature registry (`test_feature_registry.py`), the variable review (`test_variable_review.py`) and its workflow script (`test_review_script.py`).
 
 ---
 
 ## Outputs & Diagnostics
 
 The engine generates the following outputs:
-1. **`outputs/predictions/{ticker}_prediction.json`**: The full payload of a stock with price data: company profile, latest price (last close of the price panel), P/E, beta, liquidity, the applied parameters, the Step 1 entry `step1_model` (`status`, `predicted_class`, `probability`, `rank`, `n_ranked`, `top_percent`, `up_share`, `n_up`, `scoring_date`, `feature_percentiles` and `logit_contributions`; the score fields are `null` for stocks that are not ranked) and, after Step 2, the ruleset diagnostics and the final prediction (`NOT_UP`, `UP` or `UP_FINAL_BUY`). Ineligibility and a failed model gate appear only in `step1_model.status`; `final_prediction` keeps its three values.
-2. **`outputs/diagnostics/{ticker}_feature_diagnostics.json`**: The raw feature values and percentiles of the scoring date (`step1_pooled`) and the rule-by-rule Step 2 results (`step2_funds`).
+1. **`outputs/predictions/{ticker}_prediction.json`**: The full payload of a stock with price data: company profile, latest price (last close of the price panel), P/E, beta, liquidity, the applied parameters, the Step 1 entry `step1_model` (`status`, `predicted_class`, `probability`, `rank`, `n_ranked`, `top_percent`, `up_share`, `n_up`, `scoring_date`, `feature_percentiles` and `logit_contributions`; the score fields are `null` for stocks that are not ranked; a feature without a value enters the model at the neutral rank, shown as percentile 50 with contribution 0) and, after Step 2, the ruleset diagnostics and the final prediction (`NOT_UP`, `UP` or `UP_FINAL_BUY`). Ineligibility and a failed model gate appear only in `step1_model.status`; `final_prediction` keeps its three values.
+2. **`outputs/diagnostics/{ticker}_feature_diagnostics.json`**: The raw feature values (`null` if missing) and percentiles of the scoring date (`step1_pooled`) and the rule-by-rule Step 2 results (`step2_funds`).
 3. **`outputs/diagnostics/step1_model_summary.json`** and **`outputs/diagnostics/step1_validation_per_date.csv`**: The model summary (scoring date, features, coefficients and intercept, training rows, cross-section counts, validation per year and overall with the bootstrap CI, gate, parameters) and the validation metrics per test date. The summary travels with the Step 2 artifacts to the consolidation.
 4. **`data/processed/full_batch_report.json`**: All prediction payloads of a run with the execution date, the parameters and the model summary (`step1_model`). Model-level metrics are stored only here, not in each payload. It feeds the dashboard.
 5. **`data/processed/final_buy_signals.csv`**: The tickers that passed both Step 1 and Step 2 (`UP_FINAL_BUY`).
 6. **`data/processed/history/YYYY-MM/report_YYYY-MM-DD.json`**: Daily archive of the batch report. Reports older than 200 days (`history_retention_days`, based on the date in the file name) are removed automatically.
 7. **`data/processed/uplift_report.json`**: Backtest of earlier predictions. For the archived reports closest to 1, 3 and 6 months ago (within 15 days), it measures the return of every stock from the first close on or after the report date to the latest close and averages it per cohort (`UP_FINAL_BUY`, `UP`, `NOT_UP`) and over all stocks (`baseline`). Stocks priced at or below `min_price_eur` (€10) at the time of the prediction are excluded from all cohorts, as on the dashboard; `excluded_below_min_price` holds their number. Empty cohorts are `null`; `counts` holds the cohort sizes. This feeds the uplift charts on the dashboard. Until the archive covers 6 months of 3.0.0 reports, the windows include reports of the earlier per-stock models.
 8. **`data/processed/company_profiles_cache.json`**: Cached company descriptions generated with the Gemini API, committed by the pipeline so that only new tickers are requested.
+9. **`data/processed/variable_reviews/review_YYYY-MM-DD.json`** and **`.md`**: The reports of the quarterly variable review (decision and reasons, champion, paired comparison, AUC per year, selected lists, candidate pool, runtime, peak memory and parameters; see [Outputs and Adoption](#outputs-and-adoption)).
 
 Copyright (c) 2026 Conrad Kleinn. All rights reserved.

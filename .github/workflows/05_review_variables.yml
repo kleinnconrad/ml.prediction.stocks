@@ -1,0 +1,114 @@
+name: "5. Quarterly Variable Review"
+on:
+  schedule:
+    - cron: '17 3 1 2,5,8,11 *'   # 03:17 UTC on the 1st of February, May, August and November
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# One review at a time; a running review is never cancelled
+concurrency:
+  group: variable-review
+  cancel-in-progress: false
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    # A test run on 4 cores took about 1.5 minutes; the limit stops a hanging download
+    timeout-minutes: 60
+    outputs:
+      decision: ${{ steps.review.outputs.decision }}
+      review_date: ${{ steps.review.outputs.review_date }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.12.17"
+          enable-cache: true
+
+      # Writes data/processed/variable_reviews/review_<date>.json and .md. On a switch it also
+      # updates config/settings.yaml and writes the pull request and commit texts.
+      - name: Run the variable review
+        id: review
+        run: >-
+          uv run --locked python scripts/05_review_variables.py
+          --pr-body "$RUNNER_TEMP/variable_review_pr.md"
+          --commit-body "$RUNNER_TEMP/variable_review_commit.txt"
+
+      # The report goes to main like the data of the pipeline; the settings change is kept out
+      # of this commit as a patch and goes to its own pull request
+      - name: Commit the review report to main
+        env:
+          REVIEW_DATE: ${{ steps.review.outputs.review_date }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git diff -- config/settings.yaml > "$RUNNER_TEMP/settings.patch"
+          git restore config/settings.yaml
+          git add -f data/processed/variable_reviews/
+          git commit -m "chore: add variable review ${REVIEW_DATE}" || echo "No changes to commit"
+          git pull --rebase --autostash origin main
+          git push
+
+      # Pull requests created with the GITHUB_TOKEN do not start other workflows, so CI does not
+      # run on this pull request until it is closed and reopened or a commit is pushed to it
+      - name: Open the pull request of the switch
+        if: steps.review.outputs.decision == 'switch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REVIEW_DATE: ${{ steps.review.outputs.review_date }}
+          PROCEDURE: ${{ steps.review.outputs.procedure }}
+        run: |
+          branch="variable-review/${REVIEW_DATE}"
+          title="feat(step1): adopt the variable set of the review of ${REVIEW_DATE} (${PROCEDURE})"
+          if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+            echo "::error::The branch $branch already exists. Close its pull request and delete the branch, then run the review again."
+            exit 1
+          fi
+          git switch -c "$branch"
+          # Applies only the two changed lines to the updated main, so settings changes merged
+          # during the run are kept; a conflict stops the step
+          git apply --3way "$RUNNER_TEMP/settings.patch"
+          git add config/settings.yaml
+          git commit -m "$title" -m "$(cat "$RUNNER_TEMP/variable_review_commit.txt")"
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" --title "$title" --body-file "$RUNNER_TEMP/variable_review_pr.md"
+
+  notify:
+    needs: [review]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify on Success
+        if: ${{ needs.review.result == 'success' }}
+        uses: actions/github-script@v9
+        env:
+          DECISION: ${{ needs.review.outputs.decision }}
+          REVIEW_DATE: ${{ needs.review.outputs.review_date }}
+        with:
+          script: |
+            github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: context.sha,
+              body: `@${{ github.repository_owner }} Workflow **${{ github.workflow }}** completed: decision **${process.env.DECISION}** in the review of ${process.env.REVIEW_DATE}. See run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`
+            })
+
+      - name: Notify on Failure
+        if: ${{ needs.review.result == 'failure' || needs.review.result == 'cancelled' }}
+        uses: actions/github-script@v9
+        with:
+          script: |
+            github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: context.sha,
+              body: '@${{ github.repository_owner }} Workflow **${{ github.workflow }}** failed! See run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+            })

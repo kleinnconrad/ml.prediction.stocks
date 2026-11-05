@@ -7,6 +7,12 @@ permissions:
   contents: write
   pull-requests: write
 
+# One run at a time: a later run cannot rewrite the release branch while an earlier run
+# pushes its uv.lock commit to it
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
 name: release-please
 
 jobs:
@@ -29,3 +35,41 @@ jobs:
             ---
             **Legal & Attribution**
             Copyright © 2026 Conrad Kleinn. Alle Rechte vorbehalten. / All rights reserved. > This software, its architectural components, and the associated quantitative methodology are the sole property of Conrad Kleinn. Unauthorized copying, modification, or distribution of this file via any medium is strictly prohibited.
+
+      # Release Please bumps the version in pyproject.toml but not in uv.lock, which records the
+      # project's own version; a release merged with a stale lock breaks every `uv run --locked`.
+      # These steps run after the release steps, so a failure here cannot affect a release.
+      # release-please-action outputs (googleapis/release-please-action@45996ed, src/index.ts):
+      # prs_created is 'true' when a release pull request was created or updated, and pr is
+      # that pull request as JSON (headBranchName, number, ...). Release Please rewrites
+      # (force-pushes) its branch only when it updates the pull request, that is, when a new
+      # releasable commit changes the release notes. That happens in a run of this workflow,
+      # and the same run adds the lock commit again.
+      - name: Check out the release pull request
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+
+      - name: Set up uv
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.12.17"
+          enable-cache: true
+
+      - name: Update uv.lock on the release pull request
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        env:
+          BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+        run: |
+          uv lock
+          if git diff --quiet -- uv.lock; then
+            echo "uv.lock already matches pyproject.toml."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add uv.lock
+          git commit -m "chore: update uv.lock for the release"
+          git push origin "HEAD:${BRANCH}"

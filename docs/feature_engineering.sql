@@ -8,6 +8,7 @@
 -- with an adjusted close (the stock's own trading days).
 -- Settings: horizon_days = 126, threshold = 0.1,
 -- step1_ffill_limit_days = 5, step1_min_price_eur = 1.0,
+-- step1_min_history_days = 253,
 -- step1_features = ret_21, ret_63, ret_126, mom_12_1, dist_sma50, dist_sma200, vol_21, vol_126, log_traded_value, drawdown_252.
 -- ==============================================================================
 
@@ -30,6 +31,7 @@ stock_features AS (
         date,
         ticker,
         close AS price,
+        ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date) AS history_days,
         close / NULLIF(LAG(close, 21) OVER (PARTITION BY ticker ORDER BY date), 0) - 1 AS ret_21,
         close / NULLIF(LAG(close, 63) OVER (PARTITION BY ticker ORDER BY date), 0) - 1 AS ret_63,
         close / NULLIF(LAG(close, 126) OVER (PARTITION BY ticker ORDER BY date), 0) - 1 AS ret_126,
@@ -60,6 +62,7 @@ carried AS (
         f.ticker,
         f.date AS last_trade,
         f.price,
+        f.history_days,
         f.ret_21,
         f.ret_63,
         f.ret_126,
@@ -79,62 +82,74 @@ carried AS (
 ),
 
 eligible AS (
-    -- 5. Eligibility: every feature present, a positive traded value and a price above
-    --    step1_min_price_eur = 1.0
+    -- 5. Eligibility (independent of the features): at least step1_min_history_days = 253
+    --    own trading days up to the date, a positive 126-day traded value and a price above
+    --    step1_min_price_eur = 1.0; a stale stock has no carried row
     SELECT *
     FROM carried
     WHERE recency = 1
-      AND ret_21 IS NOT NULL
-      AND ret_63 IS NOT NULL
-      AND ret_126 IS NOT NULL
-      AND mom_12_1 IS NOT NULL
-      AND dist_sma50 IS NOT NULL
-      AND dist_sma200 IS NOT NULL
-      AND vol_21 IS NOT NULL
-      AND vol_126 IS NOT NULL
-      AND log_traded_value IS NOT NULL
-      AND drawdown_252 IS NOT NULL
+      AND history_days >= 253
       AND log_traded_value > 0
       AND price > 1.0
 ),
 
 ranked AS (
-    -- 6. Within-date percentile rank minus 0.5 over the eligible stocks, as pandas
-    --    rank(pct=True, method='average'): ties share their average rank, so
+    -- 6. Within-date percentile rank minus 0.5 over the eligible stocks that have a value,
+    --    as pandas rank(pct=True, method='average'): ties share their average rank, so
     --    pct = (RANK() + (ties - 1) / 2) / n. PERCENT_RANK() = (RANK() - 1) / (n - 1)
-    --    uses another scale and is not used.
+    --    uses another scale and is not used. A missing value gets the neutral rank 0.
     SELECT
         e.*,
-        (RANK() OVER (PARTITION BY date ORDER BY ret_21)
-            + (COUNT(*) OVER (PARTITION BY date, ret_21) - 1) / 2.0)
-            / COUNT(*) OVER (PARTITION BY date) - 0.5 AS r_ret_21,
-        (RANK() OVER (PARTITION BY date ORDER BY ret_63)
-            + (COUNT(*) OVER (PARTITION BY date, ret_63) - 1) / 2.0)
-            / COUNT(*) OVER (PARTITION BY date) - 0.5 AS r_ret_63,
-        (RANK() OVER (PARTITION BY date ORDER BY ret_126)
-            + (COUNT(*) OVER (PARTITION BY date, ret_126) - 1) / 2.0)
-            / COUNT(*) OVER (PARTITION BY date) - 0.5 AS r_ret_126,
-        (RANK() OVER (PARTITION BY date ORDER BY mom_12_1)
-            + (COUNT(*) OVER (PARTITION BY date, mom_12_1) - 1) / 2.0)
-            / COUNT(*) OVER (PARTITION BY date) - 0.5 AS r_mom_12_1,
-        (RANK() OVER (PARTITION BY date ORDER BY dist_sma50)
-            + (COUNT(*) OVER (PARTITION BY date, dist_sma50) - 1) / 2.0)
-            / COUNT(*) OVER (PARTITION BY date) - 0.5 AS r_dist_sma50,
-        (RANK() OVER (PARTITION BY date ORDER BY dist_sma200)
-            + (COUNT(*) OVER (PARTITION BY date, dist_sma200) - 1) / 2.0)
-            / COUNT(*) OVER (PARTITION BY date) - 0.5 AS r_dist_sma200,
-        (RANK() OVER (PARTITION BY date ORDER BY vol_21)
-            + (COUNT(*) OVER (PARTITION BY date, vol_21) - 1) / 2.0)
-            / COUNT(*) OVER (PARTITION BY date) - 0.5 AS r_vol_21,
-        (RANK() OVER (PARTITION BY date ORDER BY vol_126)
-            + (COUNT(*) OVER (PARTITION BY date, vol_126) - 1) / 2.0)
-            / COUNT(*) OVER (PARTITION BY date) - 0.5 AS r_vol_126,
-        (RANK() OVER (PARTITION BY date ORDER BY log_traded_value)
-            + (COUNT(*) OVER (PARTITION BY date, log_traded_value) - 1) / 2.0)
-            / COUNT(*) OVER (PARTITION BY date) - 0.5 AS r_log_traded_value,
-        (RANK() OVER (PARTITION BY date ORDER BY drawdown_252)
-            + (COUNT(*) OVER (PARTITION BY date, drawdown_252) - 1) / 2.0)
-            / COUNT(*) OVER (PARTITION BY date) - 0.5 AS r_drawdown_252
+        CASE WHEN ret_21 IS NULL THEN 0.0 ELSE
+            (RANK() OVER (PARTITION BY date ORDER BY ret_21 NULLS LAST)
+                + (COUNT(*) OVER (PARTITION BY date, ret_21) - 1) / 2.0)
+                / COUNT(ret_21) OVER (PARTITION BY date) - 0.5
+        END AS r_ret_21,
+        CASE WHEN ret_63 IS NULL THEN 0.0 ELSE
+            (RANK() OVER (PARTITION BY date ORDER BY ret_63 NULLS LAST)
+                + (COUNT(*) OVER (PARTITION BY date, ret_63) - 1) / 2.0)
+                / COUNT(ret_63) OVER (PARTITION BY date) - 0.5
+        END AS r_ret_63,
+        CASE WHEN ret_126 IS NULL THEN 0.0 ELSE
+            (RANK() OVER (PARTITION BY date ORDER BY ret_126 NULLS LAST)
+                + (COUNT(*) OVER (PARTITION BY date, ret_126) - 1) / 2.0)
+                / COUNT(ret_126) OVER (PARTITION BY date) - 0.5
+        END AS r_ret_126,
+        CASE WHEN mom_12_1 IS NULL THEN 0.0 ELSE
+            (RANK() OVER (PARTITION BY date ORDER BY mom_12_1 NULLS LAST)
+                + (COUNT(*) OVER (PARTITION BY date, mom_12_1) - 1) / 2.0)
+                / COUNT(mom_12_1) OVER (PARTITION BY date) - 0.5
+        END AS r_mom_12_1,
+        CASE WHEN dist_sma50 IS NULL THEN 0.0 ELSE
+            (RANK() OVER (PARTITION BY date ORDER BY dist_sma50 NULLS LAST)
+                + (COUNT(*) OVER (PARTITION BY date, dist_sma50) - 1) / 2.0)
+                / COUNT(dist_sma50) OVER (PARTITION BY date) - 0.5
+        END AS r_dist_sma50,
+        CASE WHEN dist_sma200 IS NULL THEN 0.0 ELSE
+            (RANK() OVER (PARTITION BY date ORDER BY dist_sma200 NULLS LAST)
+                + (COUNT(*) OVER (PARTITION BY date, dist_sma200) - 1) / 2.0)
+                / COUNT(dist_sma200) OVER (PARTITION BY date) - 0.5
+        END AS r_dist_sma200,
+        CASE WHEN vol_21 IS NULL THEN 0.0 ELSE
+            (RANK() OVER (PARTITION BY date ORDER BY vol_21 NULLS LAST)
+                + (COUNT(*) OVER (PARTITION BY date, vol_21) - 1) / 2.0)
+                / COUNT(vol_21) OVER (PARTITION BY date) - 0.5
+        END AS r_vol_21,
+        CASE WHEN vol_126 IS NULL THEN 0.0 ELSE
+            (RANK() OVER (PARTITION BY date ORDER BY vol_126 NULLS LAST)
+                + (COUNT(*) OVER (PARTITION BY date, vol_126) - 1) / 2.0)
+                / COUNT(vol_126) OVER (PARTITION BY date) - 0.5
+        END AS r_vol_126,
+        CASE WHEN log_traded_value IS NULL THEN 0.0 ELSE
+            (RANK() OVER (PARTITION BY date ORDER BY log_traded_value NULLS LAST)
+                + (COUNT(*) OVER (PARTITION BY date, log_traded_value) - 1) / 2.0)
+                / COUNT(log_traded_value) OVER (PARTITION BY date) - 0.5
+        END AS r_log_traded_value,
+        CASE WHEN drawdown_252 IS NULL THEN 0.0 ELSE
+            (RANK() OVER (PARTITION BY date ORDER BY drawdown_252 NULLS LAST)
+                + (COUNT(*) OVER (PARTITION BY date, drawdown_252) - 1) / 2.0)
+                / COUNT(drawdown_252) OVER (PARTITION BY date) - 0.5
+        END AS r_drawdown_252
     FROM eligible AS e
 ),
 

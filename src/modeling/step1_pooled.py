@@ -19,7 +19,7 @@ import math
 import warnings
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -53,7 +53,7 @@ GATE_SINGLE_CLASS_TRAINING = 'single_class_training'
 SUMMARY_PARAMETER_KEYS = (
     'horizon_days', 'threshold', 'step1_features', 'step1_history_years', 'feature_warmup_years',
     'step1_l2_c', 'step1_solver_tol', 'step1_max_iter', 'step1_up_share', 'step1_min_price_eur',
-    'step1_ffill_limit_days', 'step1_validation_years', 'step1_min_stocks_per_date',
+    'step1_min_history_days', 'step1_ffill_limit_days', 'step1_validation_years', 'step1_min_stocks_per_date',
     'step1_bootstrap_block_months', 'step1_bootstrap_replications', 'step1_bootstrap_seed',
     'step1_min_validation_auc_lower',
 )
@@ -156,19 +156,22 @@ def per_date_auc(df: pd.DataFrame, prob_col: str, label_col: str, min_stocks: in
     return pd.Series(values, dtype=float, name='auc').sort_index()
 
 
-def block_bootstrap_ci(values: Sequence[float], block: int, replications: int, seed: int) -> Dict[str, float]:
+def block_bootstrap_ci(values: Sequence[float], block: int, replications: int, seed: int,
+                       percentiles: Tuple[float, float] = CI_PERCENTILES) -> Dict[str, float]:
     """
     Moving-block bootstrap of the mean of a date-ordered series.
 
     Every replication concatenates randomly chosen blocks of `block` consecutive values
     (overlapping block starts, drawn with replacement) until the series length is reached.
-    The interval is the 2.5% and 97.5% percentile of the replicated means.
+    The interval is given by two percentiles of the replicated means (by default 2.5% and
+    97.5%, a two-sided 95% interval).
 
     Args:
         values (Sequence[float]): The series in date order; non-finite values are dropped.
         block (int): Block length (consecutive dates).
         replications (int): Number of bootstrap replications.
         seed (int): Seed of numpy's default random generator.
+        percentiles (Tuple[float, float]): Lower and upper percentile (0-100) of the interval.
 
     Returns:
         Dict[str, float]: mean, n, ci_lower, ci_upper and boot_sd. The interval is NaN if
@@ -190,8 +193,8 @@ def block_bootstrap_ci(values: Sequence[float], block: int, replications: int, s
         chosen = rng.choice(starts, size=n_blocks, replace=True)
         idx = (chosen[:, None] + offsets[None, :]).ravel()[:n]
         means[i] = x[idx].mean()
-    result['ci_lower'] = float(np.percentile(means, CI_PERCENTILES[0]))
-    result['ci_upper'] = float(np.percentile(means, CI_PERCENTILES[1]))
+    result['ci_lower'] = float(np.percentile(means, percentiles[0]))
+    result['ci_upper'] = float(np.percentile(means, percentiles[1]))
     result['boot_sd'] = float(np.std(means))
     return result
 
@@ -272,7 +275,7 @@ PER_DATE_COLUMNS = ['date', 'year', 'n', 'auc', 'n_top', 'top_hit_rate', 'base_r
                     'top_fwd', 'universe_fwd', 'top_minus_universe_fwd']
 
 
-def _per_date_table(test: pd.DataFrame, year: int, up_share: float, min_stocks: int) -> pd.DataFrame:
+def per_date_table(test: pd.DataFrame, year: int, up_share: float, min_stocks: int) -> pd.DataFrame:
     """
     Per-date metrics of the scored test rows of one year.
 
@@ -304,6 +307,71 @@ def _per_date_table(test: pd.DataFrame, year: int, up_share: float, min_stocks: 
     return pd.DataFrame(rows, columns=PER_DATE_COLUMNS)
 
 
+@dataclass
+class WalkForwardWindow:
+    """
+    One yearly refit of the walk-forward validation.
+
+    Attributes:
+        year (int): The test year.
+        status (str): 'ok', 'no_test_rows', 'no_training_rows' or 'single_class_training'.
+        test (np.ndarray): Boolean mask of the test rows (labels known, dated in the year).
+        train (np.ndarray): Boolean mask of the training rows (all False unless test rows exist).
+        test_start (Optional[pd.Timestamp]): First test date (None without test rows).
+    """
+    year: int
+    status: str
+    test: np.ndarray
+    train: np.ndarray
+    test_start: Optional[pd.Timestamp]
+
+
+def walk_forward_windows(dates: pd.DatetimeIndex, label_end: np.ndarray, y: np.ndarray,
+                         scoring_date: pd.Timestamp, n_years: int, history_years: int) -> List[WalkForwardWindow]:
+    """
+    The training and test rows of each yearly walk-forward refit.
+
+    The test years are the `n_years` calendar years ending with the year of the scoring
+    date. A test row needs a known label (label_end <= scoring_date). The training rows of
+    a year have a known label, label_end before the year's first test date, a date before
+    it and a date within `history_years` of it.
+
+    Args:
+        dates (pd.DatetimeIndex): Date of every row of the long panel.
+        label_end (np.ndarray): Label end date of every row (datetime64[ns]; NaT if unknown).
+        y (np.ndarray): Labels (NaN if unknown).
+        scoring_date (pd.Timestamp): Last date of the union calendar.
+        n_years (int): Number of test years.
+        history_years (int): Maximum training window in years.
+
+    Returns:
+        List[WalkForwardWindow]: One window per test year, in order.
+    """
+    scoring_date = pd.Timestamp(scoring_date)
+    history = pd.DateOffset(years=int(history_years))
+    dates = pd.DatetimeIndex(dates)
+    label_end = np.asarray(label_end, dtype='datetime64[ns]')
+    y = np.asarray(y, dtype=float)
+    known = ~np.isnan(y) & (label_end <= np.datetime64(scoring_date)) & np.asarray(dates <= scoring_date)
+    none = np.zeros(len(dates), dtype=bool)
+    windows: List[WalkForwardWindow] = []
+    for year in range(scoring_date.year - int(n_years) + 1, scoring_date.year + 1):
+        test = known & np.asarray(dates.year == year)
+        if not test.any():
+            windows.append(WalkForwardWindow(year, 'no_test_rows', none, none, None))
+            continue
+        test_start = dates[test].min()
+        train = (known & (label_end < np.datetime64(test_start)) & np.asarray(dates < test_start)
+                 & np.asarray(dates >= test_start - history))
+        status = 'ok'
+        if not train.any():
+            status = 'no_training_rows'
+        elif np.unique(y[train]).size < 2:
+            status = 'single_class_training'
+        windows.append(WalkForwardWindow(year, status, test, train, test_start))
+    return windows
+
+
 def walk_forward_validation(long_panel: pd.DataFrame, feature_cols: Sequence[str],
                             scoring_date: pd.Timestamp, settings: Dict[str, Any]) -> ValidationResult:
     """
@@ -328,10 +396,8 @@ def walk_forward_validation(long_panel: pd.DataFrame, feature_cols: Sequence[str
         metrics with the bootstrap CI, and the per-date table.
     """
     scoring_date = pd.Timestamp(scoring_date)
-    history = pd.DateOffset(years=int(settings['step1_history_years']))
     up_share = float(settings['step1_up_share'])
     min_stocks = int(settings['step1_min_stocks_per_date'])
-    n_years = int(settings['step1_validation_years'])
     cols = list(feature_cols)
     names = [_feature_name(col) for col in cols]
 
@@ -339,24 +405,15 @@ def walk_forward_validation(long_panel: pd.DataFrame, feature_cols: Sequence[str
     label_end = long_panel['label_end'].to_numpy(dtype='datetime64[ns]')
     y = long_panel['y'].to_numpy(dtype=float)
     X = long_panel[cols].to_numpy(dtype=float)
-    known = ~np.isnan(y) & (label_end <= np.datetime64(scoring_date)) & np.asarray(dates <= scoring_date)
 
     years: List[Dict[str, Any]] = []
     tables: List[pd.DataFrame] = []
     pooled_top_hits, pooled_top_rows, pooled_y_sum, pooled_rows = 0.0, 0, 0.0, 0
-    for year in range(scoring_date.year - n_years + 1, scoring_date.year + 1):
-        test = known & np.asarray(dates.year == year)
-        if not test.any():
-            years.append({'year': year, 'status': 'no_test_rows'})
-            continue
-        test_start = dates[test].min()
-        train = (known & (label_end < np.datetime64(test_start)) & np.asarray(dates < test_start)
-                 & np.asarray(dates >= test_start - history))
-        if not train.any():
-            years.append({'year': year, 'status': 'no_training_rows'})
-            continue
-        if np.unique(y[train]).size < 2:
-            years.append({'year': year, 'status': 'single_class_training'})
+    for window in walk_forward_windows(dates, label_end, y, scoring_date, int(settings['step1_validation_years']),
+                                       int(settings['step1_history_years'])):
+        year, test, train, test_start = window.year, window.test, window.train, window.test_start
+        if window.status != 'ok':
+            years.append({'year': year, 'status': window.status})
             continue
 
         model = fit_pooled_model(X[train], y[train], settings)
@@ -364,7 +421,7 @@ def walk_forward_validation(long_panel: pd.DataFrame, feature_cols: Sequence[str
         p_test = predict_probability(model, X[test])
         scored = long_panel.loc[test, ['y', 'fwd']].copy()
         scored['probability'] = p_test
-        table = _per_date_table(scored, year, up_share, min_stocks)
+        table = per_date_table(scored, year, up_share, min_stocks)
         tables.append(table)
 
         y_test = y[test]
@@ -475,7 +532,8 @@ def score_cross_section(model: LogisticRegression, cross_section: pd.DataFrame, 
     return scored
 
 
-def not_eligible_reasons(feature_panel: FeaturePanel, date: pd.Timestamp, min_price: float) -> pd.Series:
+def not_eligible_reasons(feature_panel: FeaturePanel, date: pd.Timestamp, min_price: float,
+                         min_history_days: int) -> pd.Series:
     """
     Explains why stocks are not eligible on a date.
 
@@ -483,21 +541,21 @@ def not_eligible_reasons(feature_panel: FeaturePanel, date: pd.Timestamp, min_pr
         feature_panel (FeaturePanel): The aligned frames.
         date (pd.Timestamp): The date (normally the scoring date).
         min_price (float): `step1_min_price_eur`.
+        min_history_days (int): `step1_min_history_days`.
 
     Returns:
         pd.Series: Reason per ticker (one of INELIGIBLE_REASONS; if several apply, the
-        first in that order), None for eligible stocks.
+        first in that order), None for eligible stocks. `insufficient_history` means fewer
+        than `min_history_days` own trading days up to the date.
     """
     price = feature_panel.price.loc[date]
     traded_value = feature_panel.traded_value.loc[date]
-    missing = traded_value.isna()
-    for frame in feature_panel.features.values():
-        missing |= frame.loc[date].isna()
+    history = feature_panel.history_days.loc[date].to_numpy(dtype=float)
     reasons = pd.Series(None, index=feature_panel.price.columns, dtype=object)
     tv = traded_value.to_numpy(dtype=float)
     masks = {
         'stale_price': price.isna().to_numpy(),
-        'insufficient_history': missing.to_numpy(),
+        'insufficient_history': ~(np.nan_to_num(history, nan=0.0) >= min_history_days),
         'price_at_or_below_min': (price <= min_price).to_numpy(),
         'no_traded_value': ~(np.isfinite(tv) & (np.nan_to_num(tv, nan=-1.0) > 0)),
     }
@@ -546,14 +604,15 @@ def execute_step1_pooled(price_panel: PricePanel, settings: Dict[str, Any]) -> S
     stocks carry the status model_gate_failed with null scores.
 
     Args:
-        price_panel (PricePanel): Closes and volumes of the universe.
+        price_panel (PricePanel): Prices and volumes of the universe (and the market index).
         settings (Dict[str, Any]): Loaded settings.
 
     Returns:
         Step1Result: Per-ticker results, model summary and validation.
 
     Raises:
-        ValueError: If the panel holds no prices or the feature list is invalid.
+        ValueError: If the panel holds no prices, the feature list is invalid, or the list
+            has market-relative features and the market index is missing.
     """
     feature_names = validate_feature_names(settings['step1_features'])
     feature_panel = build_feature_panel(price_panel, feature_names, settings)
@@ -565,6 +624,7 @@ def execute_step1_pooled(price_panel: PricePanel, settings: Dict[str, Any]) -> S
     history = pd.DateOffset(years=int(settings['step1_history_years']))
     up_share = float(settings['step1_up_share'])
     min_price = float(settings['step1_min_price_eur'])
+    min_history_days = int(settings['step1_min_history_days'])
 
     panel = to_long_panel(feature_panel, month_end_dates(calendar), settings)
     validation = walk_forward_validation(panel, cols, scoring_date, settings)
@@ -600,7 +660,7 @@ def execute_step1_pooled(price_panel: PricePanel, settings: Dict[str, Any]) -> S
     tickers = feature_panel.tickers
     results = pd.DataFrame(index=pd.Index(tickers, name='ticker'))
     results['latest_price'] = price_panel.close.reindex(columns=tickers).ffill().iloc[-1]
-    reasons = not_eligible_reasons(feature_panel, scoring_date, min_price)
+    reasons = not_eligible_reasons(feature_panel, scoring_date, min_price, min_history_days)
     eligible_status = STATUS_OK if gate['passed'] else STATUS_GATE_FAILED
     results['status'] = [f"{NOT_ELIGIBLE}: {reasons[t]}" if reasons[t] else eligible_status for t in tickers]
     results['predicted_class'] = scored['predicted_class'].reindex(tickers).fillna('NOT_UP')

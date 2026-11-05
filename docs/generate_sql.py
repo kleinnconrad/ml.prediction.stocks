@@ -1,8 +1,10 @@
 """
 Generates docs/feature_engineering.sql, a SQL reference of the Step 1 inputs: the
 per-stock features on each stock's own trading days, the forward return and target, the
-alignment on the union calendar, the eligibility rules and the within-date percentile
-ranks. The pipeline computes the same columns in pandas (src/processing/features.py).
+alignment on the union calendar, the eligibility rule and the within-date percentile
+ranks (with the neutral rank 0 for a missing value). The pipeline computes the same
+columns in pandas (src/processing/features.py). The reference covers the features of
+`step1_features`; the other candidates of the feature registry have no SQL template.
 
 Run from the repository root: uv run --locked python docs/generate_sql.py
 """
@@ -70,7 +72,7 @@ def build_sql(feature_names: List[str], settings: Dict) -> str:
     Args:
         feature_names (List[str]): Model features (`step1_features`).
         settings (Dict): Loaded settings (horizon_days, threshold, step1_ffill_limit_days,
-            step1_min_price_eur).
+            step1_min_price_eur, step1_min_history_days).
 
     Returns:
         str: The SQL text.
@@ -86,6 +88,7 @@ def build_sql(feature_names: List[str], settings: Dict) -> str:
     threshold = float(settings['threshold'])
     ffill_limit = int(settings['step1_ffill_limit_days'])
     min_price = float(settings['step1_min_price_eur'])
+    min_history = int(settings['step1_min_history_days'])
     columns = list(dict.fromkeys(names + [TRADED_VALUE_FEATURE]))
     indent = "        "
 
@@ -100,6 +103,7 @@ def build_sql(feature_names: List[str], settings: Dict) -> str:
         "-- with an adjusted close (the stock's own trading days).",
         f"-- Settings: horizon_days = {horizon}, threshold = {threshold},",
         f"-- step1_ffill_limit_days = {ffill_limit}, step1_min_price_eur = {min_price},",
+        f"-- step1_min_history_days = {min_history},",
         f"-- step1_features = {', '.join(names)}.",
         "-- ==============================================================================",
         "",
@@ -122,6 +126,7 @@ def build_sql(feature_names: List[str], settings: Dict) -> str:
         "        date,",
         "        ticker,",
         "        close AS price,",
+        f"        ROW_NUMBER() OVER {OWN} AS history_days,",
     ]
     for name in columns:
         lines.append(f"{indent}{FEATURE_SQL[name]()} AS {name},")
@@ -146,6 +151,7 @@ def build_sql(feature_names: List[str], settings: Dict) -> str:
         "        f.ticker,",
         "        f.date AS last_trade,",
         "        f.price,",
+        "        f.history_days,",
     ]
     lines += [f"        f.{name}," for name in columns]
     lines += [
@@ -158,32 +164,33 @@ def build_sql(feature_names: List[str], settings: Dict) -> str:
         "),",
         "",
         "eligible AS (",
-        "    -- 5. Eligibility: every feature present, a positive traded value and a price above",
-        f"    --    step1_min_price_eur = {min_price}",
+        f"    -- 5. Eligibility (independent of the features): at least step1_min_history_days = {min_history}",
+        "    --    own trading days up to the date, a positive 126-day traded value and a price above",
+        f"    --    step1_min_price_eur = {min_price}; a stale stock has no carried row",
         "    SELECT *",
         "    FROM carried",
         "    WHERE recency = 1",
-    ]
-    lines += [f"      AND {name} IS NOT NULL" for name in names]
-    lines += [
+        f"      AND history_days >= {min_history}",
         f"      AND {TRADED_VALUE_FEATURE} > 0",
         f"      AND price > {min_price}",
         "),",
         "",
         "ranked AS (",
-        "    -- 6. Within-date percentile rank minus 0.5 over the eligible stocks, as pandas",
-        "    --    rank(pct=True, method='average'): ties share their average rank, so",
+        "    -- 6. Within-date percentile rank minus 0.5 over the eligible stocks that have a value,",
+        "    --    as pandas rank(pct=True, method='average'): ties share their average rank, so",
         "    --    pct = (RANK() + (ties - 1) / 2) / n. PERCENT_RANK() = (RANK() - 1) / (n - 1)",
-        "    --    uses another scale and is not used.",
+        "    --    uses another scale and is not used. A missing value gets the neutral rank 0.",
         "    SELECT",
         "        e.*,",
     ]
     for i, name in enumerate(names):
         comma = "," if i < len(names) - 1 else ""
         lines += [
-            f"        (RANK() OVER (PARTITION BY date ORDER BY {name})",
-            f"            + (COUNT(*) OVER (PARTITION BY date, {name}) - 1) / 2.0)",
-            f"            / COUNT(*) OVER (PARTITION BY date) - 0.5 AS r_{name}{comma}",
+            f"        CASE WHEN {name} IS NULL THEN 0.0 ELSE",
+            f"            (RANK() OVER (PARTITION BY date ORDER BY {name} NULLS LAST)",
+            f"                + (COUNT(*) OVER (PARTITION BY date, {name}) - 1) / 2.0)",
+            f"                / COUNT({name}) OVER (PARTITION BY date) - 0.5",
+            f"        END AS r_{name}{comma}",
         ]
     lines += [
         "    FROM eligible AS e",
