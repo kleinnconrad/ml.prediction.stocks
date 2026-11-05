@@ -176,6 +176,33 @@ def test_candidate_pool_and_manual_sets_come_from_the_settings(review_settings: 
         R.manual_sets({**review_settings, 'review_manual_sets': {'bad': ['not_a_feature']}})
 
 
+def test_candidate_pool_by_family_is_checked_and_returned_in_registry_order(review_settings: Settings) -> None:
+    def pool(value: object) -> List[str]:
+        return R.candidate_pool({**review_settings, 'review_candidate_features': value})
+
+    assert pool({'volatility': ['vol_21'], 'returns': ['ret_63', 'ret_21'], 'seasonality': None}) == \
+        ['ret_21', 'ret_63', 'vol_21']
+    for invalid, message in (({'returns': ['vol_21']}, 'family volatility'),
+                             ({'returns': ['ret_21'], 'volatility': ['ret_21']}, 'family returns'),
+                             ({'returns': ['ret_21', 'ret_21']}, 'twice'),
+                             ({'returns': ['ret_21', 'not_a_feature']}, 'unknown'),
+                             ({'returns': 'ret_21'}, 'must list'),
+                             ({'returns': []}, 'empty'),
+                             (42, 'by family')):
+        with pytest.raises(ValueError, match=message):
+            pool(invalid)
+
+
+def test_the_pool_in_the_settings_lists_every_registered_feature_in_its_family() -> None:
+    # A feature added to the registry must also be listed in config/settings.yaml (or the
+    # registry and this test changed together), so the pool never grows unnoticed
+    listed = load_settings()['review_candidate_features']
+    assert isinstance(listed, dict)
+    by_family = {name: family for family, names in listed.items() for name in names or []}
+    assert by_family == F.FEATURE_FAMILIES
+    assert R.candidate_pool(load_settings()) == list(F.FEATURE_FUNCTIONS)
+
+
 # ----------------------------------------------------------------------------------------
 # Long panel and walk-forward evaluation
 # ----------------------------------------------------------------------------------------

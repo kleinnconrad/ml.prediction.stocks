@@ -4,8 +4,8 @@ Quarterly variable review: champion-challenger test of the Step 1 feature set.
 The champion is the current `step1_features` list, evaluated with the production model
 (pooled L2 logistic regression on within-date ranks, src/modeling/step1_pooled.py). The
 challengers are feature lists produced by fixed selection procedures from a pre-registered
-candidate pool (the feature registry of src/processing/features.py, or the list in
-`review_candidate_features`):
+candidate pool (`review_candidate_features` in config/settings.yaml, by family; every name is
+a feature of the registry in src/processing/features.py):
 
 - `stepwise`: forward selection on the mean per-date AUC of inner validation blocks, with
   an ANOVA prefilter refitted inside each inner training split;
@@ -216,25 +216,59 @@ def candidate_pool(settings: Dict[str, Any], override: Optional[Sequence[str]] =
     """
     The pre-registered candidate pool of the review.
 
+    `review_candidate_features` lists the pool by family (family name -> feature names, as
+    in config/settings.yaml). Every name must be registered in that family. A plain list of
+    names and 'all' (the whole registry) are also accepted.
+
     Args:
-        settings (Dict[str, Any]): Loaded settings (review_candidate_features: 'all' for the
-            whole registry, or a list of names).
+        settings (Dict[str, Any]): Loaded settings (review_candidate_features).
         override (Optional[Sequence[str]]): Names that replace the pool (local testing).
 
     Returns:
-        List[str]: The candidates in registry order (or in the given order).
+        List[str]: The candidates in registry order, whatever the order in the setting (an
+        override keeps its own order).
 
     Raises:
-        ValueError: On unknown or duplicate names, or an invalid setting.
+        ValueError: On unknown or duplicate names, a name listed under another family than
+            its registry family, an empty pool or an invalid setting.
     """
     if override:
         return validate_feature_names(override)
     value = settings['review_candidate_features']
     if isinstance(value, str):
         if value != 'all':
-            raise ValueError(f"review_candidate_features must be 'all' or a list of feature names, not {value!r}.")
+            raise ValueError("review_candidate_features must list feature names by family, list feature names "
+                             f"or be 'all', not {value!r}.")
         return list(FEATURE_FUNCTIONS)
-    return validate_feature_names(value)
+    if isinstance(value, dict):
+        names: List[str] = []
+        for family, members in value.items():
+            if members is None:
+                continue
+            if not isinstance(members, list):
+                raise ValueError(f"review_candidate_features: the family {family} must list feature names, "
+                                 f"not {members!r}.")
+            for name in members:
+                registered = FEATURE_FAMILIES.get(name)
+                if registered is not None and registered != family:
+                    raise ValueError(f"review_candidate_features lists {name} under {family}, but the feature "
+                                     f"registry has it in the family {registered}.")
+            names.extend(members)
+    elif isinstance(value, list):
+        names = list(value)
+    else:
+        raise ValueError(f"review_candidate_features must list feature names by family, not {value!r}.")
+    if not names:
+        raise ValueError("The candidate pool (review_candidate_features) is empty.")
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise ValueError(f"The candidate pool (review_candidate_features) lists these features twice: {duplicates}")
+    unknown = [name for name in names if name not in FEATURE_FUNCTIONS]
+    if unknown:
+        raise ValueError(f"The candidate pool (review_candidate_features) lists unknown features {unknown}; "
+                         "every candidate must be registered in src/processing/features.py.")
+    listed = set(names)
+    return [name for name in FEATURE_FUNCTIONS if name in listed]
 
 
 def manual_sets(settings: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -1605,7 +1639,12 @@ def render_markdown(report: Dict[str, Any]) -> str:
               '- Peak memory (MB): ' + (', '.join(f"{key} {_fmt(value, 0)}" for key, value in memory.items())
                                         or '-'), '']
     lines += ['## Parameters', '', '| Key | Value |', '|---|---|']
-    lines += [f"| `{key}` | {value} |" for key, value in report['parameters'].items()]
+    for key, value in report['parameters'].items():
+        if key == 'review_candidate_features' and isinstance(value, dict):
+            # The full listing is in the JSON report and in the section Candidate Pool
+            n_names = sum(len(names or []) for names in value.values())
+            value = f"{n_names} names in {len(value)} families (see [Candidate Pool](#candidate-pool))"
+        lines.append(f"| `{key}` | {value} |")
     return '\n'.join(lines) + '\n'
 
 
