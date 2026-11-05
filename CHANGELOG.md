@@ -1,5 +1,17 @@
 # Changelog
 
+## [3.0.1](https://github.com/kleinnconrad/ml.prediction.stocks/compare/v3.0.0...v3.0.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* **step1:** address the review findings of the pooled model ([c080954](https://github.com/kleinnconrad/ml.prediction.stocks/commit/c080954bc51da44a33c14f3ae4cb75c69bd53f03))
+
+
+### Documentation
+
+* **readme:** remove two filler adverbs from the paradigm section ([5cc4c72](https://github.com/kleinnconrad/ml.prediction.stocks/commit/5cc4c72292e3245df4a12e390e61ef210aa77111))
+
 ## [3.0.0](https://github.com/kleinnconrad/ml.prediction.stocks/compare/v2.1.1...v3.0.0) (2026-11-04)
 
 
