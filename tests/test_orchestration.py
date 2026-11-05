@@ -3,6 +3,7 @@ Offline tests of the orchestration (src/orchestration/steps.py, batch_runner.py 
 json_exporter.py): JSON export, the Step 1 run with mocked network calls, the Step 2
 extension of the payload and the state files passed between the steps.
 """
+import datetime
 import json
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -30,6 +31,15 @@ def test_non_finite_values_are_written_as_null(in_tmp: Path) -> None:
         'top_percent': float('inf'), 'probability': np.float64('nan'), 'n': np.int64(3)})
     text = (in_tmp / 'outputs' / 'predictions' / 'ABC.DE_prediction.json').read_text()
     assert json.loads(text) == {'top_percent': None, 'probability': None, 'n': 3}
+
+
+def test_dates_are_written_as_iso_text(in_tmp: Path) -> None:
+    # An unquoted date in config/settings.yaml is read as a date and copied into the batch report
+    json_exporter.write_json_atomic('report.json', {
+        'parameters': {'step1_features_adopted': datetime.date(2026, 11, 5)},
+        'stamp': pd.Timestamp('2026-11-05 08:30'), 'missing': pd.NaT})
+    assert json.loads((in_tmp / 'report.json').read_text()) == {
+        'parameters': {'step1_features_adopted': '2026-11-05'}, 'stamp': '2026-11-05T08:30:00', 'missing': None}
 
 
 def test_failed_serialization_keeps_the_existing_file(in_tmp: Path) -> None:

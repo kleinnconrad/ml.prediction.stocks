@@ -1,7 +1,9 @@
 """
 Offline tests of the settings file and of the Step 1 features (src/processing/features.py):
 hand-computed feature values, labels and their boundary, the union-calendar alignment,
-the eligibility rules, the within-date ranks, the month-ends and point-in-time behavior.
+the eligibility rules, the within-date ranks with the neutral rank of missing values, the
+month-ends and point-in-time behavior. The candidate pool of the variable review is tested
+in test_feature_registry.py.
 """
 from typing import Any, Callable, Dict, Tuple
 
@@ -11,7 +13,9 @@ import pytest
 
 from config.settings import load_settings
 from src.ingestion.market_api import PricePanel
+from src.modeling.variable_review import REVIEW_PARAMETER_KEYS
 from src.processing import features as F
+from tests.conftest import DEFAULT_STEP1_FEATURES
 
 Settings = Dict[str, Any]
 PanelFactory = Callable[..., PricePanel]
@@ -33,8 +37,13 @@ def test_settings_contain_parameters_used_by_the_pipeline() -> None:
                 'step1_ffill_limit_days', 'step1_validation_years', 'step1_min_stocks_per_date',
                 'step1_bootstrap_block_months', 'step1_bootstrap_replications', 'step1_bootstrap_seed',
                 'step1_min_validation_auc_lower', 'price_download_batch_size', 'price_download_retries',
-                'min_step2_score', 'min_price_eur', 'gemini_model', 'xetra_t7_url'):
+                'min_step2_score', 'min_price_eur', 'gemini_model', 'xetra_t7_url', 'step1_min_history_days',
+                'step1_features_adopted', 'market_index_ticker'):
         assert key in settings
+    assert all(key in settings for key in REVIEW_PARAMETER_KEYS)
+    # The adoption date is a quoted string, so the line-based settings update can rewrite it
+    assert isinstance(settings['step1_features_adopted'], str)
+    pd.Timestamp(settings['step1_features_adopted'])
     for removed in ('features_to_select', 'anova_k', 'quantiles', 'cv_splits', 'sfs_cv_splits',
                     'min_cv_train_rows', 'min_cv_accuracy', 'fred_publication_lag_days',
                     'fred_max_staleness_days', 'step2_history_years'):
@@ -69,10 +78,10 @@ def _series(n: int = 400, seed: int = 0) -> Tuple[pd.Series, pd.Series]:
     return close, volume
 
 
-def test_each_feature_matches_a_hand_computation() -> None:
+def test_each_production_feature_matches_a_hand_computation() -> None:
     close, volume = _series()
     volume.iloc[300] = np.nan  # a missing volume on a trading day counts as 0
-    frame = F.stock_feature_frame(close, volume, list(F.FEATURE_FUNCTIONS), horizon_days=126)
+    frame = F.stock_feature_frame(F.StockSeries.build(close, volume), DEFAULT_STEP1_FEATURES, horizon_days=126)
     c, v = close.to_numpy(), volume.fillna(0.0).to_numpy()
     r = c[1:] / c[:-1] - 1  # r[i - 1] is the return of day i
     t = 350
@@ -96,19 +105,21 @@ def test_each_feature_matches_a_hand_computation() -> None:
     assert frame['drawdown_252'].iloc[:251].isna().all() and frame['drawdown_252'].iloc[251:].notna().all()
     assert frame['vol_21'].iloc[:21].isna().all() and pd.notna(frame['vol_21'].iloc[21])
     assert frame['log_traded_value'].iloc[:125].isna().all() and pd.notna(frame['log_traded_value'].iloc[125])
+    assert frame['history_days'].tolist() == list(range(1, len(close) + 1))
 
 
 def test_labels_end_horizon_own_trading_days_later_and_the_last_rows_are_unknown(step1_settings: Settings) -> None:
     horizon = step1_settings['horizon_days']
     close, volume = _series(n=300)
-    frame = F.stock_feature_frame(close, volume, ['ret_21'], horizon_days=horizon)
+    frame = F.stock_feature_frame(F.StockSeries.build(close, volume), ['ret_21'], horizon_days=horizon)
     assert frame['label_end'].iloc[10] == close.index[10 + horizon]
     assert frame['fwd'].iloc[10] == pytest.approx(close.iloc[10 + horizon] / close.iloc[10] - 1)
     assert frame['fwd'].iloc[-horizon:].isna().all() and frame['label_end'].iloc[-horizon:].isna().all()
     assert frame['fwd'].iloc[:-horizon].notna().all()
 
-    panel = F.build_feature_panel(PricePanel(close.to_frame('A.DE'), volume.to_frame('A.DE')),
-                                  ['ret_21'], {**step1_settings, 'step1_min_price_eur': 0.0})
+    # A short history: the label boundary is tested on rows that are eligible after 126 own days
+    panel = F.build_feature_panel(PricePanel(close.to_frame('A.DE'), volume.to_frame('A.DE')), ['ret_21'],
+                                  {**step1_settings, 'step1_min_price_eur': 0.0, 'step1_min_history_days': 126})
     long = F.to_long_panel(panel, panel.calendar[-(horizon + 4):], step1_settings)
     known = long['fwd'].notna()
     assert long.loc[known, 'y'].tolist() == (long.loc[known, 'fwd'] >= step1_settings['threshold']).astype(float).tolist()
@@ -153,13 +164,13 @@ def test_a_day_without_a_trade_carries_the_last_row_for_at_most_the_ffill_limit(
     assert not panel.eligible['A.DE'].iloc[305:307].any()
 
 
-def test_eligibility_requires_features_traded_value_and_a_price_above_the_minimum(
+def test_eligibility_requires_history_traded_value_and_a_price_above_the_minimum(
         simulate_panel: PanelFactory, step1_settings: Settings) -> None:
     prices = simulate_panel(n_stocks=4, n_days=400, seed=1)
     close, volume = prices.close.copy(), prices.volume.copy()
     close['S001.DE'] = step1_settings['step1_min_price_eur']  # exactly at the minimum: not eligible
     volume['S002.DE'] = 0.0                                    # no traded value
-    close.iloc[:200, 3] = np.nan                               # listed later: features missing
+    close.iloc[:200, 3] = np.nan                               # listed later: 200 own trading days
     panel = F.build_feature_panel(PricePanel(close, volume), step1_settings['step1_features'], step1_settings)
 
     last = panel.eligible.iloc[-1]
@@ -167,10 +178,66 @@ def test_eligibility_requires_features_traded_value_and_a_price_above_the_minimu
     # The price is the only reason for S001.DE: its features and traded value are present
     assert panel.traded_value['S001.DE'].iloc[-1] > 0
     assert all(pd.notna(frame['S001.DE'].iloc[-1]) for frame in panel.features.values())
-    # Eligible exactly once every feature is present
+    # Eligible from the 253rd own trading day on, which is also the first day with every default feature
     first_full = panel.features['mom_12_1']['S000.DE'].first_valid_index()
+    assert panel.calendar.get_loc(first_full) == step1_settings['step1_min_history_days'] - 1
     assert not panel.eligible['S000.DE'].loc[:first_full].iloc[:-1].any()
     assert panel.eligible['S000.DE'].loc[first_full]
+    assert panel.history_days['S003.DE'].iloc[-1] == 200
+
+
+def _old_eligibility(panel: F.FeaturePanel, min_price: float) -> pd.DataFrame:
+    """The eligibility rule up to release 3.0.1: all features present, positive traded value, price above minimum."""
+    ok = np.ones(panel.price.shape, dtype=bool)
+    for frame in panel.features.values():
+        ok &= frame.notna().to_numpy()
+    value = panel.traded_value.to_numpy(dtype=float)
+    ok &= np.isfinite(value) & (np.nan_to_num(value, nan=-1.0) > 0)
+    ok &= np.nan_to_num(panel.price.to_numpy(dtype=float), nan=0.0) > min_price
+    return pd.DataFrame(ok, index=panel.price.index, columns=panel.price.columns)
+
+
+def test_the_history_rule_gives_the_old_eligible_set_for_the_default_features(
+        simulate_panel: PanelFactory, step1_settings: Settings) -> None:
+    prices = simulate_panel(n_stocks=12, n_days=900, seed=4)
+    close, volume = prices.close.copy(), prices.volume.copy()
+    close.iloc[:500, 1] = np.nan                        # listed later
+    close.iloc[600:603, 2] = np.nan                     # three days without a trade (carried)
+    close.iloc[700:720, 3] = np.nan                     # suspended: stale for a while
+    volume.iloc[:, 4] = 0.0                             # never traded
+    close.iloc[:, 5] = 0.9 + 0.2 * np.sin(np.arange(len(close)) / 30.0)  # around the minimum price
+    panel = F.build_feature_panel(PricePanel(close, volume), DEFAULT_STEP1_FEATURES, step1_settings)
+
+    old = _old_eligibility(panel, step1_settings['step1_min_price_eur'])
+    pd.testing.assert_frame_equal(panel.eligible, old)
+    assert 0 < panel.eligible.to_numpy().mean() < 1
+
+
+def test_an_eligible_stock_without_a_feature_value_gets_the_neutral_rank(
+        simulate_panel: PanelFactory, step1_settings: Settings) -> None:
+    prices = simulate_panel(n_stocks=8, n_days=700, seed=9)
+    # 400 own trading days: eligible, but the 504-day momentum reversal is still missing
+    close = prices.close.copy()
+    close.iloc[:300, 0] = np.nan
+    names = ['ret_21', 'mom_24_12']
+    panel = F.build_feature_panel(PricePanel(close, prices.volume), names, step1_settings)
+    date = panel.calendar[-1]
+    assert panel.eligible.loc[date].all()
+    assert pd.isna(panel.features['mom_24_12'].loc[date, 'S000.DE'])
+
+    long = F.to_long_panel(panel, [date], step1_settings).xs(date, level='date')
+    assert long.loc['S000.DE', 'r_mom_24_12'] == F.NEUTRAL_RANK
+    # The others are ranked among the seven stocks that have the value
+    others = panel.features['mom_24_12'].loc[date].drop('S000.DE')
+    expected = others.rank(pct=True, method='average') - 0.5
+    pd.testing.assert_series_equal(long['r_mom_24_12'].drop('S000.DE'), expected, check_names=False)
+    assert long['r_ret_21'].notna().all()
+
+    # The same rule in the long-panel ranks of the variable review
+    values = long[names].copy()
+    values.index = pd.MultiIndex.from_product([[date], values.index], names=['date', 'ticker'])
+    ranks = F.rank_long_panel(values)
+    np.testing.assert_allclose(ranks['mom_24_12'].to_numpy(), long['r_mom_24_12'].to_numpy(), rtol=0, atol=1e-15)
 
 
 def test_rank_within_date_matches_pandas_pct_rank_on_the_eligible_set() -> None:
@@ -186,6 +253,13 @@ def test_rank_within_date_matches_pandas_pct_rank_on_the_eligible_set() -> None:
         assert ranks.loc[date][~eligible.loc[date]].isna().all()
     assert ranks.loc['2024-01-31', 'C'] == ranks.loc['2024-01-31', 'D'] == pytest.approx(0.625 - 0.5)
     assert ranks.loc['2024-01-31', 'A'] == pytest.approx(0.5)
+
+    # An eligible cell without a value gets the neutral rank; the others are ranked without it
+    eligible.loc['2024-02-29', 'B'] = True
+    ranks = F.rank_within_date(values, eligible)
+    assert ranks.loc['2024-02-29', 'B'] == F.NEUTRAL_RANK
+    expected = values.loc['2024-02-29'].drop('B').rank(pct=True, method='average') - 0.5
+    pd.testing.assert_series_equal(ranks.loc['2024-02-29'].drop('B'), expected, check_names=False)
 
 
 def test_month_end_dates_are_the_last_calendar_date_of_each_month() -> None:

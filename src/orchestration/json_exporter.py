@@ -3,6 +3,7 @@ JSON export of the run outputs under outputs/: the per-ticker prediction payload
 per-ticker feature diagnostics and the Step 1 model summary with its per-date validation
 table. Every JSON file is written atomically, with non-finite numbers as null.
 """
+import datetime
 import json
 import logging
 import math
@@ -25,10 +26,11 @@ VALIDATION_PER_DATE_PATH = Path(DIAGNOSTICS_DIR) / 'step1_validation_per_date.cs
 
 def to_json_safe(value: Any) -> Any:
     """
-    Converts numpy types to native Python types and non-finite floats to None.
+    Converts numpy types to native Python types, non-finite floats to None and dates to ISO text.
 
     Python's json module writes NaN and Infinity as bare tokens, which are not valid JSON
-    and break JSON.parse in the dashboard.
+    and break JSON.parse in the dashboard. Dates come from settings such as an unquoted
+    `step1_features_adopted`, which YAML reads as a date.
 
     Args:
         value (Any): A JSON-like structure.
@@ -42,6 +44,10 @@ def to_json_safe(value: Any) -> Any:
         return [to_json_safe(v) for v in value]
     if isinstance(value, np.generic):
         value = value.item()
+    if value is pd.NaT:
+        return None
+    if isinstance(value, (datetime.date, datetime.datetime)):
+        return value.isoformat()
     if isinstance(value, float) and not math.isfinite(value):
         return None
     return value

@@ -1,8 +1,10 @@
 """
 Offline tests of the batch price download (src/ingestion/market_api.py) with a mocked
-yfinance: batching, retries of the tickers without data, the Berlin-today cut and the
-mapping of the yfinance column layouts to the requested tickers.
+yfinance: batching, retries of the tickers without data, the Berlin-today cut, the mapping
+of the yfinance column layouts to the requested tickers, the open, high and low fields, the
+market index and the CSV price cache.
 """
+from pathlib import Path
 from typing import Any, List, Sequence
 
 import numpy as np
@@ -19,6 +21,9 @@ def _yf_frame(tickers: Sequence[str], dates: Sequence[Any], missing: Sequence[st
     data = pd.DataFrame(1.0, index=pd.DatetimeIndex(dates, name='Date'), columns=columns)
     for i, ticker in enumerate(sorted(tickers)):
         data[('Close', ticker.upper())] = 10.0 + i + np.arange(len(dates))
+        data[('Open', ticker.upper())] = 9.5 + i + np.arange(len(dates))
+        data[('High', ticker.upper())] = 10.5 + i + np.arange(len(dates))
+        data[('Low', ticker.upper())] = 9.0 + i + np.arange(len(dates))
         data[('Volume', ticker.upper())] = 1000.0
         if ticker in missing:
             data.loc[:, (slice(None), ticker.upper())] = np.nan
@@ -55,6 +60,67 @@ def test_batches_retries_only_missing_tickers_and_drops_today(monkeypatch: pytes
     assert panel.close.index.max() < today              # rows dated today are dropped
     assert len(panel.close) == 5
     assert panel.volume.shape == panel.close.shape and (panel.volume == 1000.0).all().all()
+    for frame in (panel.open, panel.high, panel.low):
+        assert frame.shape == panel.close.shape and list(frame.columns) == list(panel.close.columns)
+    assert (panel.low <= panel.open).all().all() and (panel.high >= panel.close).all().all()
+    assert panel.market is None  # no market_index_ticker in the settings
+
+
+def test_the_market_index_is_downloaded_with_the_batches_but_not_ranked(
+        monkeypatch: pytest.MonkeyPatch, no_sleep: None) -> None:
+    dates = pd.bdate_range('2024-01-01', periods=6)
+    calls: List[List[str]] = []
+
+    def fake_download(tickers: Sequence[str], **kwargs: Any) -> pd.DataFrame:
+        calls.append(list(tickers))
+        frame = _yf_frame(tickers, dates)
+        if '^GDAXI' in tickers:
+            # The index also has a row on a day without any stock trade
+            extra = frame.iloc[[0]].set_axis(pd.DatetimeIndex([pd.Timestamp('2023-12-29')], name='Date'))
+            extra.loc[:, (slice(None), [t.upper() for t in tickers if t != '^GDAXI'])] = np.nan
+            frame = pd.concat([extra, frame])
+        return frame
+
+    monkeypatch.setattr(market_api.yf, 'download', fake_download)
+    settings = {'price_download_batch_size': 2, 'price_download_retries': 1, 'market_index_ticker': '^GDAXI'}
+    panel = market_api.fetch_price_panel(['BBB.DE', 'AAA.DE', '^GDAXI'], 12, settings)
+
+    assert calls == [['AAA.DE', 'BBB.DE'], ['^GDAXI']]
+    assert list(panel.close.columns) == ['AAA.DE', 'BBB.DE'] and panel.missing == []
+    assert panel.close.index.equals(pd.DatetimeIndex(dates, name='Date'))  # the index day does not extend it
+    assert panel.market is not None and panel.market.name == '^GDAXI'
+    assert len(panel.market) == len(dates) + 1
+
+
+def test_a_missing_market_index_is_reported_and_left_out(monkeypatch: pytest.MonkeyPatch, no_sleep: None) -> None:
+    dates = pd.bdate_range('2024-01-01', periods=5)
+    monkeypatch.setattr(market_api.yf, 'download',
+                        lambda tickers, **kwargs: _yf_frame(tickers, dates, missing=['^GDAXI']))
+    settings = {'price_download_batch_size': 60, 'price_download_retries': 1, 'market_index_ticker': '^GDAXI'}
+    panel = market_api.fetch_price_panel(['AAA.DE'], 12, settings)
+    assert panel.market is None and panel.missing == [] and list(panel.close.columns) == ['AAA.DE']
+
+
+def test_the_price_cache_round_trip_is_exact(tmp_path: Path) -> None:
+    rng = np.random.default_rng(0)
+    dates = pd.bdate_range('2020-01-01', periods=50)
+    close = pd.DataFrame(rng.lognormal(3.0, 1.0, (50, 3)), index=dates, columns=['AAA.DE', 'BBB.DE', 'C1.DE'])
+    close.iloc[3, 1] = np.nan
+    panel = market_api.PricePanel(close=close, volume=close * 1000.0, missing=['GONE.DE'], open=close * 0.99,
+                                  high=close * 1.01, low=close * 0.98,
+                                  market=pd.Series(rng.lognormal(9.0, 0.1, 52), name='^GDAXI',
+                                                   index=pd.bdate_range('2019-12-30', periods=52)))
+    market_api.save_price_panel(panel, tmp_path / 'cache')
+    loaded = market_api.load_price_panel(tmp_path / 'cache')
+
+    for name in ('close', 'volume', 'open', 'high', 'low'):
+        pd.testing.assert_frame_equal(getattr(loaded, name), getattr(panel, name), check_exact=True,
+                                      check_freq=False, check_index_type=False)
+    pd.testing.assert_series_equal(loaded.market, panel.market, check_exact=True, check_freq=False,
+                                   check_index_type=False)
+    assert loaded.missing == ['GONE.DE']
+    with pytest.raises(FileNotFoundError):
+        market_api.load_price_panel(tmp_path / 'empty')
 
 
 def test_a_failing_request_is_retried(monkeypatch: pytest.MonkeyPatch, no_sleep: None) -> None:
