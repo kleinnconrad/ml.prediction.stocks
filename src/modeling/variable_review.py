@@ -1647,9 +1647,9 @@ def render_pr_body(report: Dict[str, Any], report_path: str) -> str:
               f"- Current ({len(current)}): {', '.join(f'`{f}`' for f in current)}",
               f"- Proposed ({len(proposed)}): {', '.join(f'`{f}`' for f in proposed)}", '']
     lines += ['## Before Merging', '',
-              "- This pull request was created with the workflow's `GITHUB_TOKEN`. GitHub does not start other "
-              "workflows for such pull requests, so the `CI` workflow has not run. Close and reopen the pull "
-              "request, or push a commit to its branch, to run the checks before merging.",
+              "- This pull request was created with the workflow's `GITHUB_TOKEN`, so GitHub runs the `CI` "
+              "workflow only after approval. Select **Approve workflows to run** in the merge box to run the "
+              "checks before merging.",
               f"- The full report is `{report_path}` on `main`.",
               f"- Output size: the proposed list has {len(proposed)} features against {len(current)} now. The "
               "prediction payloads (`feature_percentiles`, `logit_contributions`), the feature diagnostics and "
