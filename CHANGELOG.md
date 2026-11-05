@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.1.0](https://github.com/kleinnconrad/ml.prediction.stocks/compare/v3.0.1...v3.1.0) (2026-11-05)
+
+
+### Features
+
+* **review:** add a quarterly review that tests 237 candidate variables against the Step 1 set and proposes a switch by pull request ([959137b](https://github.com/kleinnconrad/ml.prediction.stocks/commit/959137bf12bbab024f382212d12b678edd707101))
+
 ## [3.0.1](https://github.com/kleinnconrad/ml.prediction.stocks/compare/v3.0.0...v3.0.1) (2026-11-05)
 
 
