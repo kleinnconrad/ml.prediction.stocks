@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.2.0](https://github.com/kleinnconrad/ml.prediction.stocks/compare/v3.1.0...v3.2.0) (2026-11-05)
+
+
+### Features
+
+* **review:** list the candidate pool of the variable review by famil… ([834bc8a](https://github.com/kleinnconrad/ml.prediction.stocks/commit/834bc8a9cafa884523b2d7e74aad83eec4394870))
+* **review:** list the candidate pool of the variable review by family in settings.yaml ([baede12](https://github.com/kleinnconrad/ml.prediction.stocks/commit/baede1257d74fc300a24847fddd26135bd920ab1))
+
 ## [3.1.0](https://github.com/kleinnconrad/ml.prediction.stocks/compare/v3.0.1...v3.1.0) (2026-11-05)
 
 
