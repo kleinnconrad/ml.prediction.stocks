@@ -27,7 +27,50 @@ price_download_retries: 3            # re-downloads of the tickers that came bac
 market_index_ticker: "^GDAXI"        # market index downloaded with the prices: input of the market-relative features, never ranked
 
 # Quarterly variable review: champion-challenger test of the Step 1 feature set (scripts/05_review_variables.py)
-review_candidate_features: all       # candidate pool: 'all' (every feature of the registry) or a list of feature names
+# Candidate pool of the variable review by family: every name must be a feature of the registry
+# (src/processing/features.py) in that family; the order does not matter. Change the pool deliberately
+# before a review, not in response to its results.
+review_candidate_features:
+  returns: [ret_1, ret_5, ret_10, ret_21, ret_42, ret_63, ret_84, ret_126, ret_189, ret_252]
+  momentum: [mom_12_1, mom_12_2, mom_12_3, mom_9_1, mom_6_1, mom_3_1, mom_12_6, mom_24_12]
+  sma_distance: [dist_sma10, dist_sma20, dist_sma50, dist_sma100, dist_sma150, dist_sma200, dist_sma250]
+  sma_crossover: [sma5_sma20, sma10_sma20, sma10_sma50, sma20_sma50, sma20_sma100, sma50_sma200, sma20_sma200,
+                  sma100_sma200]
+  sma_slope: [sma20_chg_5, sma20_chg_21, sma50_chg_21, sma50_chg_63, sma100_chg_21, sma100_chg_63,
+              sma200_chg_21, sma200_chg_63]
+  highs_lows: [dist_high_10, dist_high_21, dist_high_63, dist_high_126, drawdown_252, dist_high_504,
+               dist_low_10, dist_low_21, dist_low_63, dist_low_126, dist_low_252, dist_low_504, range_pos_21,
+               range_pos_63, range_pos_126, range_pos_252, range_pos_504, days_since_high_63,
+               days_since_high_126, days_since_high_252, days_since_low_63, days_since_low_126,
+               days_since_low_252, maxdd_63, maxdd_126, maxdd_252, ulcer_63, ulcer_126, ulcer_252]
+  volatility: [vol_5, vol_10, vol_21, vol_42, vol_63, vol_126, vol_252, downvol_21, downvol_63, downvol_126,
+               downvol_252, upvol_21, upvol_63, upvol_126, upvol_252, vol_ratio_5_21, vol_ratio_5_63,
+               vol_ratio_10_63, vol_ratio_21_63, vol_ratio_21_126, vol_ratio_21_252, vol_ratio_63_252,
+               vov_126, vov_252]
+  range_volatility: [parkinson_10, parkinson_21, parkinson_63, parkinson_126, garman_klass_10,
+                     garman_klass_21, garman_klass_63, garman_klass_126, hl_range_5, hl_range_10, hl_range_21,
+                     hl_range_63, hl_range_126]
+  higher_moments: [skew_21, skew_63, skew_126, skew_252, kurt_21, kurt_63, kurt_126, kurt_252, max_ret_5,
+                   max_ret_10, max_ret_21, max_ret_63, max_ret_126, max_ret_252, min_ret_5, min_ret_10,
+                   min_ret_21, min_ret_63, min_ret_126, min_ret_252]
+  market: [beta_63, beta_126, beta_252, beta_504, corr_63, corr_126, corr_252, idio_vol_21, idio_vol_63,
+           idio_vol_126, idio_vol_252, downbeta_126, downbeta_252, upbeta_126, upbeta_252, mkt_r2_63,
+           mkt_r2_126, mkt_r2_252, resid_mom_12_1, resid_mom_6_1, rel_ret_5, rel_ret_10, rel_ret_21,
+           rel_ret_63, rel_ret_126, rel_ret_252]
+  liquidity: [log_tv_5, log_tv_10, log_tv_21, log_tv_63, log_traded_value, log_tv_252, amihud_10, amihud_21,
+              amihud_63, amihud_126, amihud_252, zero_ret_21, zero_ret_63, zero_ret_126, zero_ret_252,
+              zero_vol_21, zero_vol_63, zero_vol_126, zero_vol_252, vol_trend_5_21, vol_trend_5_63,
+              vol_trend_21_63, vol_trend_21_126, vol_trend_21_252, vol_trend_63_252, volume_cv_21,
+              volume_cv_63, volume_cv_126]
+  trend_quality: [trend_r2_21, trend_r2_63, trend_r2_126, trend_r2_252, trend_t_21, trend_t_63, trend_t_126,
+                  trend_t_252, up_days_10, up_days_21, up_days_63, up_days_126, up_days_252, id_63, id_126,
+                  id_252, autocorr_21, autocorr_63, autocorr_126, autocorr_252]
+  overnight_intraday: [overnight_5, overnight_21, overnight_63, overnight_126, intraday_5, intraday_21,
+                       intraday_63, intraday_126]
+  oscillators: [rsi_7, rsi_14, rsi_21, rsi_28, stoch_k_14, stoch_k_28, stoch_d_14, williams_r_14, macd_line,
+                macd_signal, macd_hist, boll_b_20, boll_b_50, boll_width_20, boll_width_50, cci_20, cci_50,
+                mfi_14, mfi_28, cmf_21, cmf_63, obv_slope_21, obv_slope_63, obv_slope_126, adx_14, adx_28]
+  seasonality: [seas_1y, seas_2y]
 review_validation_years: 8           # calendar years of the walk-forward comparison, ending with the year of the last trading day before the review date
 review_inner_splits: 3               # maximum number of inner validation blocks of a selection procedure
 review_inner_validation_months: 24   # month-ends per inner validation block; each block is preceded by a label-end purge

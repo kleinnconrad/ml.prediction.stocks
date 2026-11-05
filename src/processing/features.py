@@ -1330,7 +1330,8 @@ def _register(family: str, entries: Dict[str, FeatureFunction]) -> None:
 
 # One function per feature name, f(StockSeries) on a stock's own trading days. The model
 # reads its feature list from `step1_features` in config/settings.yaml; the variable review
-# uses every registered feature as a candidate (`review_candidate_features: all`). A price
+# tests the candidates listed by family in `review_candidate_features` there, and a test
+# requires that list to contain every registered feature. A price
 # level (the log price of study E6) is not registered: a past adjusted close is divided by
 # the ratios of all later splits, so its level at a past date depends on splits that
 # happened after that date.
