@@ -1,3 +1,8 @@
+"""
+Monthly maintenance script (run locally with a residential IP): refreshes the cached
+quarterly financial statements of the qualified tickers in data/raw/fundamentals/, which
+Step 2 reads, writes the cache manifest and updates the date badge in README.md.
+"""
 import os
 import sys
 import time
@@ -18,10 +23,12 @@ from src.ingestion.funds_api import write_cache_manifest
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def update_all_fundamentals():
+def update_all_fundamentals() -> None:
+    """Fetches the statements of every qualified ticker (with a .F fallback) and caches them as CSV files."""
     state_file = os.path.join('data', 'state', 'qualified_tickers.csv')
     if not os.path.exists(state_file):
-        logger.error(f"State file {state_file} not found. Please run Step 1 first to generate qualified tickers.")
+        logger.error(f"State file {state_file} not found. Run scripts/01_run_t7.py (workflow "
+                     "'1. T7 Download (Initialization)') to create the qualified ticker list.")
         return
         
     df = pd.read_csv(state_file)

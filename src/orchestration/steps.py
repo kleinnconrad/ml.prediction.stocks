@@ -78,8 +78,8 @@ def load_qualified_universe(path: Path = QUALIFIED_TICKERS_PATH) -> List[Dict[st
     """
     path = Path(path)
     if not path.exists():
-        raise FileNotFoundError(f"{path} is missing. Run scripts/01_run_t7.py (workflow '1. T7 Download') "
-                                "to create and commit the qualified ticker list.")
+        raise FileNotFoundError(f"{path} is missing. Run scripts/01_run_t7.py (workflow "
+                                "'1. T7 Download (Initialization)') to create and commit the qualified ticker list.")
     frame = pd.read_csv(path)
     if 'Ticker' not in frame.columns:
         raise ValueError(f"{path} has no 'Ticker' column.")

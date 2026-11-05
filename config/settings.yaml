@@ -4,7 +4,7 @@ threshold: 0.10
 
 # Step 1 model: one pooled cross-sectional logistic regression for all stocks (src/modeling/step1_pooled.py)
 step1_features: [ret_21, ret_63, ret_126, mom_12_1, dist_sma50, dist_sma200, vol_21, vol_126, log_traded_value, drawdown_252]  # each rank-transformed within each date
-step1_history_years: 10              # training window of the final model and of every validation refit
+step1_history_years: 10              # maximum training window of the final model and of each validation refit (the early refits get fewer years)
 feature_warmup_years: 2              # extra price history fetched before the training window; the 252-day features need one year
 step1_l2_c: 0.1                      # inverse L2 regularization strength of the logistic regression
 step1_solver_tol: 1.0e-8             # convergence tolerance of the lbfgs solver

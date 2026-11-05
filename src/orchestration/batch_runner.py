@@ -29,7 +29,8 @@ def describe_step1_result(ticker: str, row: Dict[str, Any], n_ranked: int) -> st
         n_ranked (int): Number of ranked stocks on the scoring date.
 
     Returns:
-        str: e.g. "SAP.DE: rank 12 of 371, probability 0.41, UP".
+        str: e.g. "SAP.DE: rank 12 of 371, probability 0.41, UP (ok)", where the bracket
+        holds the Step 1 status.
     """
     rank = row.get('rank')
     if rank is None or rank != rank:  # NaN: not ranked

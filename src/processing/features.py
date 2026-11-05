@@ -159,7 +159,7 @@ def stock_feature_frame(close: pd.Series, volume: pd.Series, feature_names: Sequ
     Returns:
         pd.DataFrame: One row per trading day with the features, `log_traded_value` (needed
         for eligibility), `fwd` (close[t + horizon] / close[t] - 1), `label_end` (the date of
-        that later close), `price` and `last_trade` (the row's own date).
+        that later close) and `price`.
     """
     names = validate_feature_names(feature_names)
     c = close.dropna().astype(float)
@@ -172,7 +172,6 @@ def stock_feature_frame(close: pd.Series, volume: pd.Series, feature_names: Sequ
     frame['fwd'] = c.shift(-horizon_days) / c - 1.0
     frame['label_end'] = own_dates.shift(-horizon_days)
     frame['price'] = c
-    frame['last_trade'] = own_dates
     return frame
 
 
@@ -187,8 +186,8 @@ class FeaturePanel:
         traded_value (pd.DataFrame): log_traded_value (eligibility input).
         fwd (pd.DataFrame): Forward return over `horizon_days` own trading days (NaN if unknown).
         label_end (pd.DataFrame): Date of the close that ends the forward return (NaT if unknown).
-        price (pd.DataFrame): Close carried for at most `step1_ffill_limit_days` days.
-        last_trade (pd.DataFrame): Date of the stock's own trading day a row comes from.
+        price (pd.DataFrame): Close carried for at most `step1_ffill_limit_days` days (NaN
+            once the last own trading day is older, i.e. a stale price).
         eligible (pd.DataFrame): Boolean eligibility mask.
     """
     feature_names: List[str]
@@ -197,7 +196,6 @@ class FeaturePanel:
     fwd: pd.DataFrame
     label_end: pd.DataFrame
     price: pd.DataFrame
-    last_trade: pd.DataFrame
     eligible: pd.DataFrame
 
     @property
@@ -260,7 +258,7 @@ def build_feature_panel(price_panel: PricePanel, feature_names: Sequence[str],
     close = price_panel.close.sort_index()
     calendar = pd.DatetimeIndex(close.dropna(how='all').index)
     tickers = sorted(close.columns)
-    columns = list(dict.fromkeys(names + [TRADED_VALUE_FEATURE, 'fwd', 'label_end', 'price', 'last_trade']))
+    columns = list(dict.fromkeys(names + [TRADED_VALUE_FEATURE, 'fwd', 'label_end', 'price']))
     store: Dict[str, Dict[str, pd.Series]] = {col: {} for col in columns}
     empty_volume = pd.Series(dtype=float)
     for ticker in tickers:
@@ -287,8 +285,7 @@ def build_feature_panel(price_panel: PricePanel, feature_names: Sequence[str],
     logger.info(f"Feature panel: {price.shape[1]} stocks on {len(calendar)} trading days; "
                 f"{int(eligible.iloc[-1].sum()) if len(calendar) else 0} eligible on the last day.")
     return FeaturePanel(feature_names=names, features=features, traded_value=traded_value,
-                        fwd=wide('fwd'), label_end=wide('label_end'), price=price,
-                        last_trade=wide('last_trade'), eligible=eligible)
+                        fwd=wide('fwd'), label_end=wide('label_end'), price=price, eligible=eligible)
 
 
 def rank_within_date(values: pd.DataFrame, eligible: pd.DataFrame) -> pd.DataFrame:

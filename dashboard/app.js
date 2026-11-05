@@ -39,8 +39,11 @@ document.addEventListener('DOMContentLoaded', () => {
   let parameters = {};
   // Report-level summary of the pooled Step 1 model; absent in reports before 3.0.0
   let step1Model = null;
+  // True if the pooled Step 1 (release 3.0.0 or later) produced the report, even when the
+  // report has no model summary; reports before 3.0.0 come from the per-stock models
+  let isPooledReport = false;
 
-  // Best-ranked stocks first; stocks without a rank (not eligible, older reports) last
+  // Rank 1 first; stocks without a rank (not eligible, older reports) last
   let currentSort = { column: 'rank', asc: true };
 
   const tableBodyOther = document.getElementById('table-body');
@@ -90,7 +93,9 @@ document.addEventListener('DOMContentLoaded', () => {
          parameters = data.parameters || {};
          step1Model = isPlainObject(data.step1_model) ? data.step1_model : null;
       }
-      
+      isPooledReport = step1Model !== null || reportData.some(
+        d => isPlainObject(d.step1_model) && d.step1_model.model === 'pooled_cross_sectional_logit');
+
       // Stocks priced at or below min_price_eur (settings.yaml, 10 EUR) are hidden from all KPIs and
       // tables; the uplift evaluation excludes them as well (documented in the README)
       const minPrice = typeof parameters.min_price_eur === 'number' ? parameters.min_price_eur : 10;
@@ -255,8 +260,16 @@ document.addEventListener('DOMContentLoaded', () => {
       metaParams.appendChild(badge);
     }
 
-    const shareLabel = document.getElementById('up-share-label');
-    if (shareLabel && typeof upShare() === 'number') shareLabel.textContent = fmtPercent(upShare(), 0);
+    // Describe the Step 1 design that produced this report: the per-stock models before
+    // release 3.0.0 followed no top-share rule
+    const subtitle = document.getElementById('subtitle');
+    if (subtitle) {
+      const share = upShare();
+      const upRule = typeof share === 'number' ? `the top ${fmtPercent(share, 0)} are UP` : 'the top share is UP';
+      subtitle.textContent = isPooledReport
+        ? `Step 1 ranks all stocks against each other with one pooled model; ${upRule}. Step 2 checks the financial statements of the UP stocks.`
+        : 'This report comes from the per-stock Step 1 models used before release 3.0.0. Step 2 checks the financial statements of the UP stocks.';
+    }
   }
 
   // Share of the ranking marked UP: from the model summary, else from the parameters
@@ -274,7 +287,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // Step 2 only runs for Step 1 UP stocks, so UP and UP_FINAL_BUY together are the Step 1 passes
     const step1Up = reportData.filter(d => d.final_prediction === 'UP' || d.final_prediction === 'UP_FINAL_BUY').length;
     kpiUp.textContent = step1Up;
-    if (kpiUpLabel && typeof upShare() === 'number') kpiUpLabel.textContent = `Step 1 UP (Top ${fmtPercent(upShare(), 0)})`;
+    if (kpiUpLabel) {
+      kpiUpLabel.textContent = isPooledReport && typeof upShare() === 'number'
+        ? `Step 1 UP (Top ${fmtPercent(upShare(), 0)})` : 'Step 1 UP';
+    }
     
     const notUp = reportData.filter(d => d.final_prediction === 'NOT_UP').length;
     kpiNotUp.textContent = notUp;

@@ -1,3 +1,10 @@
+"""
+Local CLI of the Xetra Two-Step Stock Prediction Engine.
+
+Without arguments it runs the full local batch (T7 download, Step 1 for the qualified
+universe, Step 2, report and uplift evaluation). With --ticker it ranks the qualified
+universe with the pooled Step 1 model and exports only that ticker's payload.
+"""
 import logging
 import sys
 import os
@@ -18,7 +25,8 @@ def read_version() -> str:
     with open(Path(__file__).resolve().parents[1] / 'pyproject.toml', 'rb') as f:
         return tomllib.load(f)['project']['version']
 
-def main():
+def main() -> None:
+    """Parses the arguments and runs the batch or the single-ticker mode; exits with 1 on an error."""
     parser = argparse.ArgumentParser(description="Xetra Two-Step Stock Prediction Engine")
     parser.add_argument("--ticker", type=str, default=None,
                         help="Rank the qualified universe with the pooled Step 1 model and export only this "

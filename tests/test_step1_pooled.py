@@ -1,4 +1,10 @@
+"""
+Offline tests of the pooled Step 1 model (src/modeling/step1_pooled.py): per-date AUC, block
+bootstrap, gate, top-share selection, walk-forward purge, training window, statuses,
+payload schema, and synthetic universes with a planted signal and with pure noise.
+"""
 import json
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -7,9 +13,14 @@ from sklearn.metrics import roc_auc_score
 
 from src.ingestion.market_api import PricePanel
 from src.modeling import step1_pooled as S
+from src.processing import features as F
+
+Settings = Dict[str, Any]
+PanelFactory = Callable[..., PricePanel]
 
 
-def _long_panel(n_stocks=40, start='2015-01-31', periods=72, seed=0, signal=0.0):
+def _long_panel(n_stocks: int = 40, start: str = '2015-01-31', periods: int = 72, seed: int = 0,
+                signal: float = 0.0) -> pd.DataFrame:
     """Synthetic month-end panel with one rank feature and a label that ends 6 months later."""
     rng = np.random.default_rng(seed)
     dates = pd.date_range(start, periods=periods, freq='ME')
@@ -22,7 +33,7 @@ def _long_panel(n_stocks=40, start='2015-01-31', periods=72, seed=0, signal=0.0)
                          'y': (fwd >= 0.1).astype(float)}, index=index)
 
 
-def test_per_date_auc_skips_small_and_single_class_dates():
+def test_per_date_auc_skips_small_and_single_class_dates() -> None:
     rng = np.random.default_rng(0)
     rows = []
     for date, n, single in (('2024-01-31', 40, False), ('2024-02-29', 10, False), ('2024-03-28', 40, True)):
@@ -38,7 +49,7 @@ def test_per_date_auc_skips_small_and_single_class_dates():
     assert auc.iloc[0] == pytest.approx(roc_auc_score(first['y'], first['p']))
 
 
-def test_block_bootstrap_is_deterministic_and_the_interval_contains_the_mean():
+def test_block_bootstrap_is_deterministic_and_the_interval_contains_the_mean() -> None:
     values = np.random.default_rng(1).normal(0.56, 0.03, 90)
     first = S.block_bootstrap_ci(values, block=6, replications=500, seed=0)
     second = S.block_bootstrap_ci(values, block=6, replications=500, seed=0)
@@ -58,24 +69,35 @@ def test_block_bootstrap_is_deterministic_and_the_interval_contains_the_mean():
     ([0.47, 0.53], False, S.GATE_LOW_AUC),
     (None, False, S.GATE_INSUFFICIENT_DATES),
 ])
-def test_gate_requires_the_lower_ci_bound_above_the_threshold(ci, passed, reason):
+def test_gate_requires_the_lower_ci_bound_above_the_threshold(ci: Optional[List[float]], passed: bool,
+                                                              reason: Optional[str]) -> None:
     validation = S.ValidationResult(years=[], overall={'auc_ci': ci}, per_date=pd.DataFrame())
     gate = S.evaluate_gate(validation, {'step1_min_validation_auc_lower': 0.5})
     assert gate['passed'] is passed and gate['reason'] == reason and gate['threshold'] == 0.5
 
 
 @pytest.mark.parametrize('n_ranked,expected', [(370, 37), (375, 38), (374, 37), (5, 1), (4, 1), (1, 1), (0, 0)])
-def test_top_share_size_rounds_half_up_with_at_least_one_stock(n_ranked, expected):
+def test_top_share_size_rounds_half_up_with_at_least_one_stock(n_ranked: int, expected: int) -> None:
     assert S.n_up_for(n_ranked, 0.10) == expected
 
 
-def test_ties_are_broken_by_ticker():
+def test_top_share_size_uses_exact_decimal_arithmetic() -> None:
+    # 0.35 * 90 is 31.499999999999996 in binary floating point; the rule asks for floor(31.5 + 0.5)
+    assert S.n_up_for(90, 0.35) == 32
+    for percent in range(1, 100):
+        for n_ranked in range(1, 301):
+            # floor(percent / 100 * n + 1/2) in integer arithmetic, capped at n
+            expected = min(n_ranked, max(1, (2 * percent * n_ranked + 100) // 200))
+            assert S.n_up_for(n_ranked, percent / 100) == expected, (percent, n_ranked)
+
+
+def test_ties_are_broken_by_ticker() -> None:
     probability = pd.Series({'BBB': 0.5, 'AAA': 0.5, 'CCC': 0.7, 'DDD': 0.1})
     assert S.rank_by_probability(probability).to_dict() == {'BBB': 3, 'AAA': 2, 'CCC': 1, 'DDD': 4}
     assert S.top_share_mask(probability, 0.5).tolist() == [False, True, True, False]
 
 
-def test_nobody_is_up_when_the_gate_fails(step1_settings):
+def test_nobody_is_up_when_the_gate_fails(step1_settings: Settings) -> None:
     panel = _long_panel(seed=2, signal=1.0)
     panel = panel.rename(columns={'r_x': 'r_ret_21'})
     settings = {**step1_settings, 'step1_features': ['ret_21'], 'step1_up_share': 0.1}
@@ -92,13 +114,16 @@ def test_nobody_is_up_when_the_gate_fails(step1_settings):
     assert passed['top_percent'].max() == pytest.approx(100.0)
 
 
-def test_walk_forward_training_labels_end_before_the_first_test_date(step1_settings):
+def test_walk_forward_training_labels_end_before_the_first_test_date(step1_settings: Settings) -> None:
     panel = _long_panel(seed=3, signal=1.0)
     scoring_date = panel.index.get_level_values('date').max()
     result = S.walk_forward_validation(panel, ['r_x'], scoring_date, step1_settings)
+    n_years = step1_settings['step1_validation_years']
+    history = pd.DateOffset(years=step1_settings['step1_history_years'])
 
     fitted = [year for year in result.years if year['status'] == 'ok']
-    assert [year['year'] for year in result.years] == list(range(scoring_date.year - 3, scoring_date.year + 1))
+    assert [year['year'] for year in result.years] == list(range(scoring_date.year - n_years + 1,
+                                                                 scoring_date.year + 1))
     assert fitted
     dates = panel.index.get_level_values('date')
     for year in fitted:
@@ -106,13 +131,15 @@ def test_walk_forward_training_labels_end_before_the_first_test_date(step1_setti
         assert pd.Timestamp(year['max_label_end']) < test_start
         assert pd.Timestamp(year['train_last']) < test_start
         expected_rows = ((panel['label_end'] < test_start) & (dates < test_start)
-                         & (dates >= test_start - pd.DateOffset(years=3))).sum()
+                         & (dates >= test_start - history)).sum()
         assert year['n_train'] == expected_rows
+        # Keyed by feature name (the rank column without its prefix), as in the model summary
+        assert list(year['coefficients']) == ['x']
     # Test rows need a known label: the last 6 months are never scored
     assert result.per_date['date'].max() <= scoring_date - pd.DateOffset(months=6)
 
 
-def test_a_year_without_training_rows_is_skipped_and_recorded(step1_settings):
+def test_a_year_without_training_rows_is_skipped_and_recorded(step1_settings: Settings) -> None:
     panel = _long_panel(start='2019-01-31', periods=30, seed=4)
     scoring_date = panel.index.get_level_values('date').max()
     result = S.walk_forward_validation(panel, ['r_x'], scoring_date, step1_settings)
@@ -121,7 +148,17 @@ def test_a_year_without_training_rows_is_skipped_and_recorded(step1_settings):
     assert statuses[2020] == 'ok'
 
 
-def _special_universe(simulate_panel):
+def test_a_year_with_a_single_training_class_is_skipped_and_recorded(step1_settings: Settings) -> None:
+    panel = _long_panel(seed=4)
+    panel['y'] = 0.0  # no row reaches the threshold
+    scoring_date = panel.index.get_level_values('date').max()
+    result = S.walk_forward_validation(panel, ['r_x'], scoring_date, step1_settings)
+    assert {year['status'] for year in result.years} == {'single_class_training'}
+    assert result.overall['n_years_fitted'] == 0 and result.overall['auc_ci'] is None
+
+
+def _special_universe(simulate_panel: PanelFactory) -> PricePanel:
+    """A universe with one stock for each ineligibility reason and one ticker without prices."""
     prices = simulate_panel(n_stocks=36, n_days=1300, drift_sd=0.0008, seed=5)
     close, volume = prices.close.copy(), prices.volume.copy()
     close['PENNY.DE'] = 0.8
@@ -137,7 +174,7 @@ def _special_universe(simulate_panel):
     return PricePanel(close=close, volume=volume, missing=['GONE.DE'])
 
 
-def test_ineligible_stocks_get_a_status_and_no_score(simulate_panel, step1_settings):
+def test_ineligible_stocks_get_a_status_and_no_score(simulate_panel: PanelFactory, step1_settings: Settings) -> None:
     result = S.execute_step1_pooled(_special_universe(simulate_panel), step1_settings)
     status = result.results['status']
 
@@ -154,15 +191,74 @@ def test_ineligible_stocks_get_a_status_and_no_score(simulate_panel, step1_setti
     assert cross['n_universe'] == 40 and cross['n_ranked'] == 36
     assert cross['not_eligible'] == {'stale_price': 1, 'insufficient_history': 1,
                                      'price_at_or_below_min': 1, 'no_traded_value': 1}
+    assert list(cross['not_eligible']) == list(S.INELIGIBLE_REASONS)
     assert cross['no_price_data'] == ['GONE.DE']
     assert result.results.loc['STALE.DE', 'latest_price'] == pytest.approx(
         _special_universe(simulate_panel).close['STALE.DE'].dropna().iloc[-1])
 
 
-def test_payloads_and_summary_are_plain_json(simulate_panel, step1_settings):
+def test_the_final_model_uses_the_known_labels_of_the_history_window(simulate_panel: PanelFactory,
+                                                                      step1_settings: Settings) -> None:
+    full = simulate_panel(drift_sd=0.0008, seed=11)
+    calendar = full.close.index
+    # Scoring date exactly horizon_days trading days after a month-end: the label of that
+    # month-end ends on the scoring date. It is known, but the final model must not use it.
+    month_end = F.month_end_dates(calendar)[-10]
+    scoring_date = calendar[calendar.get_loc(month_end) + step1_settings['horizon_days']]
+    prices = PricePanel(full.close.loc[:scoring_date], full.volume.loc[:scoring_date])
+
+    result = S.execute_step1_pooled(prices, step1_settings)
+
+    feature_panel = F.build_feature_panel(prices, step1_settings['step1_features'], step1_settings)
+    panel = F.to_long_panel(feature_panel, F.month_end_dates(feature_panel.calendar), step1_settings)
+    dates = panel.index.get_level_values('date')
+    start = scoring_date - pd.DateOffset(years=step1_settings['step1_history_years'])
+    known = panel['y'].notna()
+    assert (known & (panel['label_end'] == scoring_date)).any()   # the boundary case exists
+    assert (known & (dates < start)).any()                         # the window binds
+    expected = known & (panel['label_end'] < scoring_date) & (dates < scoring_date) & (dates >= start)
+    training = result.summary['training']
+    assert result.summary['scoring_date'] == scoring_date.date().isoformat()
+    assert training['n_rows'] == int(expected.sum())
+    assert training['first_date'] == dates[expected].min().date().isoformat()
+    assert pd.Timestamp(training['first_date']) >= start
+    assert pd.Timestamp(training['max_label_end']) < scoring_date
+
+
+def test_without_a_final_model_nothing_is_ranked_and_nobody_is_up(simulate_panel: PanelFactory,
+                                                                    step1_settings: Settings) -> None:
+    # 300 trading days: the features are complete from day 253, but no forward return is known yet
+    result = S.execute_step1_pooled(simulate_panel(n_days=300, seed=12), step1_settings)
+    summary = result.summary
+
+    assert summary['gate']['passed'] is False and summary['gate']['reason'] == S.GATE_NO_TRAINING_ROWS
+    assert summary['training']['n_rows'] == 0 and summary['coefficients'] == {} and summary['intercept'] is None
+    cross = summary['cross_section']
+    assert cross['n_ranked'] == 0 and cross['n_up'] == 0 and cross['n_predicted_up'] == 0
+    assert (result.results['status'] == S.STATUS_GATE_FAILED).all()
+    assert result.results['rank'].isna().all() and result.up_tickers == []
+    entry = S.ticker_step1_model(result, 'S000.DE')
+    assert entry['status'] == S.STATUS_GATE_FAILED and entry['predicted_class'] == 'NOT_UP'
+    assert entry['probability'] is None and entry['rank'] is None and entry['top_percent'] is None
+    assert entry['n_ranked'] == 0 and entry['n_up'] == 0 and entry['feature_percentiles'] is None
+    json.dumps(summary, allow_nan=False)
+
+
+def test_a_single_class_in_the_final_training_rows_fails_the_gate(simulate_panel: PanelFactory,
+                                                                   step1_settings: Settings) -> None:
+    settings = {**step1_settings, 'threshold': 10.0}  # no stock gains 1000% within the horizon
+    result = S.execute_step1_pooled(simulate_panel(n_days=1300, seed=13), settings)
+
+    assert result.summary['training']['n_rows'] > 0
+    assert result.summary['gate']['passed'] is False
+    assert result.summary['gate']['reason'] == S.GATE_SINGLE_CLASS_TRAINING
+    assert result.summary['cross_section']['n_ranked'] == 0 and result.up_tickers == []
+
+
+def test_payloads_and_summary_are_plain_json(simulate_panel: PanelFactory, step1_settings: Settings) -> None:
     result = S.execute_step1_pooled(_special_universe(simulate_panel), step1_settings)
 
-    def walk(value):
+    def walk(value: Any) -> None:
         if isinstance(value, dict):
             for item in value.values():
                 walk(item)
@@ -192,9 +288,13 @@ def test_payloads_and_summary_are_plain_json(simulate_panel, step1_settings):
     row = result.results.loc['S002.DE']
     for name, contribution in ranked['logit_contributions'].items():
         assert contribution == pytest.approx(coef[name] * row[f"r_{name}"], abs=1e-4)
+    # The yearly refits use the same coefficient keys as the final model
+    fitted = [year for year in result.summary['validation']['years'] if year['status'] == 'ok']
+    assert fitted and all(list(year['coefficients']) == list(coef) for year in fitted)
 
 
-def test_a_planted_cross_sectional_signal_is_found_and_passes_the_gate(simulate_panel, step1_settings):
+def test_a_planted_cross_sectional_signal_is_found_and_passes_the_gate(simulate_panel: PanelFactory,
+                                                                       step1_settings: Settings) -> None:
     result = S.execute_step1_pooled(simulate_panel(drift_sd=0.0008, seed=11), step1_settings)
     validation = result.summary['validation']
 
@@ -202,13 +302,13 @@ def test_a_planted_cross_sectional_signal_is_found_and_passes_the_gate(simulate_
     assert validation['auc_ci'][0] > 0.5
     assert result.summary['gate']['passed'] is True
     n_up = result.summary['cross_section']['n_up']
-    assert n_up == S.n_up_for(result.summary['cross_section']['n_ranked'], 0.10)
+    assert n_up == S.n_up_for(result.summary['cross_section']['n_ranked'], step1_settings['step1_up_share'])
     assert len(result.up_tickers) == n_up
     up = result.results.loc[result.up_tickers]
     assert (up['status'] == 'ok').all() and up['rank'].max() == n_up
 
 
-def test_pure_noise_is_not_mistaken_for_a_signal(simulate_panel, step1_settings):
+def test_pure_noise_is_not_mistaken_for_a_signal(simulate_panel: PanelFactory, step1_settings: Settings) -> None:
     # Production-like validation length (8 years, about 90 test dates); with fewer dates the
     # block bootstrap has too few blocks to cover 0.5 reliably
     prices = simulate_panel(n_stocks=80, n_days=2850, drift_sd=0.0, seed=100, start='2012-01-02')

@@ -1,3 +1,10 @@
+"""
+GitHub Actions entry point of the consolidation (job `consolidate-and-commit`).
+
+Merges the prediction payloads of the Step 2 shard artifacts into one payload per ticker
+and publishes full_batch_report.json (with the Step 1 model summary as the key
+`step1_model`), final_buy_signals.csv and the dated history archive.
+"""
 import os
 import sys
 
@@ -12,7 +19,14 @@ from src.orchestration.report import consolidate_predictions, find_prediction_fi
 
 logger = logging.getLogger(__name__)
 
-def main():
+
+def main() -> None:
+    """
+    Consolidates the shard outputs and publishes the batch report.
+
+    Raises:
+        FileNotFoundError: If no prediction payload matches the predictions glob.
+    """
     parser = argparse.ArgumentParser(description="Consolidates the shard outputs into the published batch report.")
     parser.add_argument("--predictions-glob", default="step2_artifacts/**/predictions/*.json",
                         help="Glob of the prediction payloads to consolidate (** matches any directories)")
