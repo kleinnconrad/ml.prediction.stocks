@@ -15,7 +15,8 @@
   <div class="container">
     <header class="glass-panel main-header">
       <h1 class="gradient-text">stock-predictor</h1>
-      <p class="subtitle">Step 1 ranks all stocks against each other with one pooled model; the top <span id="up-share-label">10%</span> are UP. Step 2 checks the financial statements of the UP stocks.</p>
+      <!-- Replaced by app.js with the Step 1 design of the loaded report (pooled ranking or the per-stock models before 3.0.0) -->
+      <p class="subtitle" id="subtitle">Step 1 selects the UP stocks. Step 2 checks the financial statements of the UP stocks.</p>
       
       <div class="metadata-section">
         <div class="metadata-item">
@@ -37,7 +38,7 @@
         <p class="kpi-value highlight" id="kpi-buys">-</p>
       </div>
       <div class="glass-panel kpi-card">
-        <h3 id="kpi-up-label" title="Stocks in the top share of the Step 1 ranking (UP and UP_FINAL_BUY) among the displayed stocks">Step 1 UP (Top Share)</h3>
+        <h3 id="kpi-up-label" title="Stocks that passed Step 1 (UP and UP_FINAL_BUY) among the displayed stocks; from release 3.0.0 these are the top share of the Step 1 ranking">Step 1 UP</h3>
         <p class="kpi-value" id="kpi-up">-</p>
       </div>
       <div class="glass-panel kpi-card">
@@ -163,6 +164,6 @@
     </section>
   </div>
 
-  <script src="app.js?v=6"></script>
+  <script src="app.js?v=7"></script>
 </body>
 </html>

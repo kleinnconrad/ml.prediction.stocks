@@ -11,6 +11,9 @@ jobs:
   # One pooled model ranks all stocks against each other, so Step 1 runs on a single runner
   step1:
     runs-on: ubuntu-latest
+    # A test run took 16 minutes, mostly the per-ticker Yahoo Finance requests; the limit
+    # stops a hanging request before GitHub's default of 360 minutes
+    timeout-minutes: 60
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
@@ -26,12 +29,14 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: uv run --locked python scripts/02_run_step1.py
 
+      # A missing file fails this job instead of the downloads in the three Step 2 shards
       - name: Upload Step 1 State Artifact
         uses: actions/upload-artifact@v7
         with:
           name: step1-state
           path: |
             data/state/step1_passed.csv
+          if-no-files-found: error
           retention-days: 7
 
       # Every uploaded file must stay under outputs/, so that the artifact root is outputs/
@@ -43,11 +48,13 @@ jobs:
           path: |
             outputs/predictions/
             outputs/diagnostics/
+          if-no-files-found: error
           retention-days: 7
 
   step2-matrix:
     needs: step1
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         shard: [0, 1, 2]
@@ -88,6 +95,7 @@ jobs:
   consolidate-and-commit:
     needs: step2-matrix
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7

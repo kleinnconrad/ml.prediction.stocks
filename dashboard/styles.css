@@ -437,6 +437,16 @@ details.stock-variables[open] summary::before {
   font-size: 0.75rem;
   color: var(--text-muted);
   margin-top: 0.25rem;
+  /* Long gate reasons (e.g. auc_ci_lower_at_or_below_threshold) wrap inside the card */
+  overflow-wrap: anywhere;
+}
+
+/* Wrap the facts between words. break-word (unlike anywhere) keeps the longest word as the
+   minimum width, so the flex cell does not shrink the value and split it mid-word; a token
+   is broken only if it is wider than the whole cell. */
+.model-facts .var-value {
+  word-break: normal;
+  overflow-wrap: break-word;
 }
 
 .model-note {

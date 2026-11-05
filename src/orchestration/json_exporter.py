@@ -1,3 +1,8 @@
+"""
+JSON export of the run outputs under outputs/: the per-ticker prediction payloads, the
+per-ticker feature diagnostics and the Step 1 model summary with its per-date validation
+table. Every JSON file is written atomically, with non-finite numbers as null.
+"""
 import json
 import logging
 import math
@@ -67,19 +72,23 @@ def write_json_atomic(file_path: str, data: Any) -> None:
 
 
 def _read_json(file_path: str) -> Optional[Any]:
+    """Reads a JSON file; returns None if the file does not exist."""
     if not os.path.exists(file_path):
         return None
     with open(file_path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
 
-def export_prediction_json(ticker: str, payload_data: Dict[str, Any]):
+def export_prediction_json(ticker: str, payload_data: Dict[str, Any]) -> None:
     """
     Exports the final prediction and model parameters to a strict JSON schema.
 
     Args:
         ticker (str): The stock ticker.
         payload_data (Dict[str, Any]): The formatted payload data.
+
+    Raises:
+        TypeError, ValueError: If the payload cannot be serialized; an existing file is kept.
     """
     file_path = os.path.join(PREDICTIONS_DIR, f"{ticker}_prediction.json")
     try:
@@ -100,7 +109,7 @@ def load_prediction_json(ticker: str) -> Optional[Dict[str, Any]]:
     return _read_json(os.path.join(PREDICTIONS_DIR, f"{ticker}_prediction.json"))
 
 
-def export_feature_diagnostics_json(ticker: str, diagnostics_data: Dict[str, Any]):
+def export_feature_diagnostics_json(ticker: str, diagnostics_data: Dict[str, Any]) -> None:
     """
     Exports the per-ticker feature diagnostics to a JSON file.
 

@@ -1,33 +1,45 @@
+"""
+Offline tests of the orchestration (src/orchestration/steps.py, batch_runner.py and
+json_exporter.py): JSON export, the Step 1 run with mocked network calls, the Step 2
+extension of the payload and the state files passed between the steps.
+"""
 import json
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from src.ingestion.market_api import PricePanel
 from src.orchestration import json_exporter, steps
+
+Settings = Dict[str, Any]
+PanelFactory = Callable[..., PricePanel]
 
 
 @pytest.fixture
-def in_tmp(monkeypatch, tmp_path):
+def in_tmp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Runs the test in an empty working directory (outputs/ and data/ are written there)."""
     monkeypatch.chdir(tmp_path)
     return tmp_path
 
 
-def test_non_finite_values_are_written_as_null(in_tmp):
+def test_non_finite_values_are_written_as_null(in_tmp: Path) -> None:
     json_exporter.export_prediction_json('ABC.DE', {
-        'ks_cutoff': float('inf'), 'latest_prob': np.float64('nan'), 'n': np.int64(3)})
+        'top_percent': float('inf'), 'probability': np.float64('nan'), 'n': np.int64(3)})
     text = (in_tmp / 'outputs' / 'predictions' / 'ABC.DE_prediction.json').read_text()
-    assert json.loads(text) == {'ks_cutoff': None, 'latest_prob': None, 'n': 3}
+    assert json.loads(text) == {'top_percent': None, 'probability': None, 'n': 3}
 
 
-def test_failed_serialization_keeps_the_existing_file(in_tmp):
+def test_failed_serialization_keeps_the_existing_file(in_tmp: Path) -> None:
     json_exporter.export_prediction_json('ABC.DE', {'final_prediction': 'UP'})
     with pytest.raises(TypeError):
         json_exporter.export_prediction_json('ABC.DE', {'bad': object()})
     assert json_exporter.load_prediction_json('ABC.DE') == {'final_prediction': 'UP'}
 
 
-def test_step2_extends_the_step1_payload_and_diagnostics(in_tmp, monkeypatch):
+def test_step2_extends_the_step1_payload_and_diagnostics(in_tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     json_exporter.export_prediction_json('ABC.DE', {
         'stock_name': 'ABC.DE', 'step1_model': {'predicted_class': 'UP'}, 'final_prediction': 'UP'})
     json_exporter.export_feature_diagnostics_json('ABC.DE', {'step1_pooled': {'features': ['ret_21']}})
@@ -48,13 +60,13 @@ def test_step2_extends_the_step1_payload_and_diagnostics(in_tmp, monkeypatch):
     assert set(diagnostics) == {'step1_pooled', 'step2_funds'}
 
 
-def test_step2_without_fundamentals_keeps_step1_result(in_tmp, monkeypatch):
+def test_step2_without_fundamentals_keeps_step1_result(in_tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     json_exporter.export_prediction_json('ABC.DE', {'stock_name': 'ABC.DE', 'final_prediction': 'UP'})
     monkeypatch.setattr(steps, 'fetch_fundamentals', lambda ticker: pd.DataFrame())
     assert steps.run_step2_for_ticker('ABC.DE')['final_prediction'] == 'UP'
 
 
-def test_fundamentals_cache_age_comes_from_the_manifest(in_tmp):
+def test_fundamentals_cache_age_comes_from_the_manifest(in_tmp: Path) -> None:
     from datetime import date
     from src.ingestion import funds_api
 
@@ -63,7 +75,8 @@ def test_fundamentals_cache_age_comes_from_the_manifest(in_tmp):
     assert funds_api.cache_age_days(today=date(2026, 10, 9)) == 17
 
 
-def _patch_step1_network(monkeypatch, panel):
+def _patch_step1_network(monkeypatch: pytest.MonkeyPatch, panel: PricePanel) -> None:
+    """Replaces the price download, the company profiles, the market snapshot and the jitter."""
     monkeypatch.setattr(steps, 'fetch_price_panel', lambda tickers, years, settings: panel)
     monkeypatch.setattr(steps, 'fetch_company_profile',
                         lambda ticker, name, model: {'full_name': name, 'description': f'{name} makes things.'})
@@ -72,8 +85,8 @@ def _patch_step1_network(monkeypatch, panel):
     monkeypatch.setattr(steps, 'apply_anti_jitter', lambda: None)
 
 
-def test_pooled_step1_exports_every_ticker_with_prices_and_the_model_summary(in_tmp, monkeypatch,
-                                                                             simulate_panel, step1_settings):
+def test_pooled_step1_exports_every_ticker_with_prices_and_the_model_summary(
+        in_tmp: Path, monkeypatch: pytest.MonkeyPatch, simulate_panel: PanelFactory, step1_settings: Settings) -> None:
     panel = simulate_panel(n_stocks=30, n_days=1500, drift_sd=0.0012, seed=7)
     panel.missing = ['GONE.DE']
     _patch_step1_network(monkeypatch, panel)
@@ -105,8 +118,8 @@ def test_pooled_step1_exports_every_ticker_with_prices_and_the_model_summary(in_
     assert set(diagnostics['step1_pooled']) == {'features', 'feature_values', 'feature_percentiles'}
 
 
-def test_only_the_requested_ticker_is_exported_but_the_whole_universe_is_ranked(in_tmp, monkeypatch,
-                                                                                 simulate_panel, step1_settings):
+def test_only_the_requested_ticker_is_exported_but_the_whole_universe_is_ranked(
+        in_tmp: Path, monkeypatch: pytest.MonkeyPatch, simulate_panel: PanelFactory, step1_settings: Settings) -> None:
     panel = simulate_panel(n_stocks=30, n_days=1500, drift_sd=0.0012, seed=7)
     _patch_step1_network(monkeypatch, panel)
     universe = [{'Ticker': t, 'Company': t} for t in panel.close.columns]
@@ -120,7 +133,7 @@ def test_only_the_requested_ticker_is_exported_but_the_whole_universe_is_ranked(
     assert run.up_tickers in ([], ['S005.DE'])
 
 
-def test_step1_payload_maps_the_predicted_class_to_the_final_prediction():
+def test_step1_payload_maps_the_predicted_class_to_the_final_prediction() -> None:
     settings = steps.load_settings()
     entry = {'model': 'pooled_cross_sectional_logit', 'status': 'ok', 'predicted_class': 'UP'}
     payload = steps.build_step1_payload('ABC.DE', 'ABC AG', entry, 12.5, settings,
@@ -133,7 +146,7 @@ def test_step1_payload_maps_the_predicted_class_to_the_final_prediction():
     assert steps.build_step1_payload('ABC.DE', 'ABC AG', entry_down, None, settings, {}, {})['final_prediction'] == 'NOT_UP'
 
 
-def test_step1_passed_file_round_trip_and_header_only_means_no_up_stock(in_tmp):
+def test_step1_passed_file_round_trip_and_header_only_means_no_up_stock(in_tmp: Path) -> None:
     path = in_tmp / 'data' / 'state' / 'step1_passed.csv'
     with pytest.raises(FileNotFoundError):
         steps.load_step1_passed(path)
@@ -150,7 +163,7 @@ def test_step1_passed_file_round_trip_and_header_only_means_no_up_stock(in_tmp):
         steps.load_step1_passed(path)
 
 
-def test_qualified_universe_defaults_the_company_name(in_tmp):
+def test_qualified_universe_defaults_the_company_name(in_tmp: Path) -> None:
     path = in_tmp / 'qualified_tickers.csv'
     with pytest.raises(FileNotFoundError, match='01_run_t7'):
         steps.load_qualified_universe(path)
@@ -159,7 +172,7 @@ def test_qualified_universe_defaults_the_company_name(in_tmp):
                                                   {'Ticker': 'BBB.DE', 'Company': 'Unknown Company'}]
 
 
-def test_single_ticker_mode_ranks_the_qualified_universe(in_tmp, monkeypatch):
+def test_single_ticker_mode_ranks_the_qualified_universe(in_tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from src.orchestration import batch_runner
 
     with pytest.raises(FileNotFoundError):
@@ -168,9 +181,10 @@ def test_single_ticker_mode_ranks_the_qualified_universe(in_tmp, monkeypatch):
     state = in_tmp / 'data' / 'state'
     state.mkdir(parents=True)
     (state / 'qualified_tickers.csv').write_text('Ticker,Company\nAAA.DE,A AG\n')
-    captured = {}
+    captured: Dict[str, Any] = {}
 
-    def fake_run(universe, settings, only_tickers=None):
+    def fake_run(universe: List[Dict[str, str]], settings: Settings,
+                 only_tickers: Optional[List[str]] = None) -> None:
         captured['universe'], captured['only'] = universe, only_tickers
         raise RuntimeError('stop after capturing the arguments')
 
@@ -181,7 +195,7 @@ def test_single_ticker_mode_ranks_the_qualified_universe(in_tmp, monkeypatch):
     assert captured['only'] == ['SAP.DE']
 
 
-def test_rank_log_line_describes_ranked_and_unranked_tickers():
+def test_rank_log_line_describes_ranked_and_unranked_tickers() -> None:
     from src.orchestration.batch_runner import describe_step1_result
 
     ranked = {'rank': 12.0, 'probability': 0.4123, 'predicted_class': 'UP', 'status': 'ok'}

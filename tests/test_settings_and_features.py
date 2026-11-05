@@ -1,3 +1,10 @@
+"""
+Offline tests of the settings file and of the Step 1 features (src/processing/features.py):
+hand-computed feature values, labels and their boundary, the union-calendar alignment,
+the eligibility rules, the within-date ranks, the month-ends and point-in-time behavior.
+"""
+from typing import Any, Callable, Dict, Tuple
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -6,14 +13,17 @@ from config.settings import load_settings
 from src.ingestion.market_api import PricePanel
 from src.processing import features as F
 
+Settings = Dict[str, Any]
+PanelFactory = Callable[..., PricePanel]
 
-def test_load_settings_returns_independent_copies():
+
+def test_load_settings_returns_independent_copies() -> None:
     first = load_settings()
     first['horizon_days'] = -1
     assert load_settings()['horizon_days'] != -1
 
 
-def test_settings_contain_parameters_used_by_the_pipeline():
+def test_settings_contain_parameters_used_by_the_pipeline() -> None:
     from src.modeling.step1_pooled import SUMMARY_PARAMETER_KEYS
     from src.orchestration.steps import APPLIED_PARAMETER_KEYS
 
@@ -32,17 +42,16 @@ def test_settings_contain_parameters_used_by_the_pipeline():
     # Every payload and summary key must exist, or the export raises KeyError
     assert all(key in settings for key in APPLIED_PARAMETER_KEYS)
     assert all(key in settings for key in SUMMARY_PARAMETER_KEYS)
-    # The eligibility price and the dashboard price filter are distinct parameters
-    assert settings['step1_min_price_eur'] != settings['min_price_eur']
+    # The eligibility price and the dashboard price filter are separate parameters
+    assert {'step1_min_price_eur', 'min_price_eur'} <= set(settings)
 
 
-def test_default_feature_list_is_known_to_the_registry():
+def test_default_feature_list_is_known_to_the_registry() -> None:
     names = load_settings()['step1_features']
     assert F.validate_feature_names(names) == names
-    assert len(names) == 10
 
 
-def test_unknown_or_duplicate_feature_names_raise():
+def test_unknown_or_duplicate_feature_names_raise() -> None:
     with pytest.raises(ValueError, match='Unknown'):
         F.validate_feature_names(['ret_21', 'not_a_feature'])
     with pytest.raises(ValueError, match='duplicates'):
@@ -51,7 +60,8 @@ def test_unknown_or_duplicate_feature_names_raise():
         F.validate_feature_names([])
 
 
-def _series(n=400, seed=0):
+def _series(n: int = 400, seed: int = 0) -> Tuple[pd.Series, pd.Series]:
+    """A random-walk close and an integer volume series on business days."""
     rng = np.random.default_rng(seed)
     index = pd.bdate_range('2020-01-01', periods=n)
     close = pd.Series(50 * np.exp(np.cumsum(0.02 * rng.standard_normal(n))), index=index)
@@ -59,7 +69,7 @@ def _series(n=400, seed=0):
     return close, volume
 
 
-def test_each_feature_matches_a_hand_computation():
+def test_each_feature_matches_a_hand_computation() -> None:
     close, volume = _series()
     volume.iloc[300] = np.nan  # a missing volume on a trading day counts as 0
     frame = F.stock_feature_frame(close, volume, list(F.FEATURE_FUNCTIONS), horizon_days=126)
@@ -88,29 +98,51 @@ def test_each_feature_matches_a_hand_computation():
     assert frame['log_traded_value'].iloc[:125].isna().all() and pd.notna(frame['log_traded_value'].iloc[125])
 
 
-def test_labels_end_horizon_own_trading_days_later_and_the_last_rows_are_unknown():
+def test_labels_end_horizon_own_trading_days_later_and_the_last_rows_are_unknown(step1_settings: Settings) -> None:
+    horizon = step1_settings['horizon_days']
     close, volume = _series(n=300)
-    frame = F.stock_feature_frame(close, volume, ['ret_21'], horizon_days=126)
-    assert frame['label_end'].iloc[10] == close.index[136]
-    assert frame['fwd'].iloc[10] == pytest.approx(close.iloc[136] / close.iloc[10] - 1)
-    assert frame['fwd'].iloc[-126:].isna().all() and frame['label_end'].iloc[-126:].isna().all()
-    assert frame['fwd'].iloc[:-126].notna().all()
+    frame = F.stock_feature_frame(close, volume, ['ret_21'], horizon_days=horizon)
+    assert frame['label_end'].iloc[10] == close.index[10 + horizon]
+    assert frame['fwd'].iloc[10] == pytest.approx(close.iloc[10 + horizon] / close.iloc[10] - 1)
+    assert frame['fwd'].iloc[-horizon:].isna().all() and frame['label_end'].iloc[-horizon:].isna().all()
+    assert frame['fwd'].iloc[:-horizon].notna().all()
 
     panel = F.build_feature_panel(PricePanel(close.to_frame('A.DE'), volume.to_frame('A.DE')),
-                                  ['ret_21'], {**load_settings(), 'step1_min_price_eur': 0.0})
-    long = F.to_long_panel(panel, panel.calendar[-130:], load_settings())
-    threshold = load_settings()['threshold']
+                                  ['ret_21'], {**step1_settings, 'step1_min_price_eur': 0.0})
+    long = F.to_long_panel(panel, panel.calendar[-(horizon + 4):], step1_settings)
     known = long['fwd'].notna()
-    assert long.loc[known, 'y'].tolist() == (long.loc[known, 'fwd'] >= threshold).astype(float).tolist()
-    assert long.loc[~known, 'y'].isna().all() and (~known).sum() == 126
+    assert long.loc[known, 'y'].tolist() == (long.loc[known, 'fwd'] >= step1_settings['threshold']).astype(float).tolist()
+    assert long.loc[~known, 'y'].isna().all() and (~known).sum() == horizon
 
 
-def test_a_day_without_a_trade_carries_the_last_row_for_at_most_the_ffill_limit():
+def test_a_forward_return_equal_to_the_threshold_is_a_positive_label(step1_settings: Settings) -> None:
+    threshold = step1_settings['threshold']
+    dates = pd.to_datetime(['2024-01-31', '2024-02-29'])
+    tickers = ['A.DE', 'B.DE', 'C.DE']
+
+    def wide(value: Any) -> pd.DataFrame:
+        return pd.DataFrame(value, index=dates, columns=tickers)
+
+    panel = F.FeaturePanel(
+        feature_names=['ret_21'], features={'ret_21': wide([[0.1, 0.2, 0.3], [0.3, 0.1, 0.2]])},
+        traded_value=wide(10.0), fwd=wide([[threshold, np.nextafter(threshold, -1.0), np.nan],
+                                           [threshold + 0.5, -0.2, threshold]]),
+        label_end=wide(pd.Timestamp('2024-08-30')), price=wide(20.0), eligible=wide(True))
+
+    long = F.to_long_panel(panel, dates, step1_settings)
+
+    assert long.loc[(dates[0], 'A.DE'), 'y'] == 1.0   # exactly at the threshold: positive
+    assert long.loc[(dates[0], 'B.DE'), 'y'] == 0.0   # just below it
+    assert np.isnan(long.loc[(dates[0], 'C.DE'), 'y'])  # not known yet
+    assert long.xs(dates[1], level='date')['y'].tolist() == [1.0, 0.0, 1.0]
+
+
+def test_a_day_without_a_trade_carries_the_last_row_for_at_most_the_ffill_limit(step1_settings: Settings) -> None:
     index = pd.bdate_range('2020-01-01', periods=600)
     close = pd.DataFrame({'A.DE': np.linspace(10, 20, 600), 'B.DE': np.linspace(20, 10, 600)}, index=index)
     close.iloc[300:307, 0] = np.nan  # A does not trade on 7 consecutive days
     prices = PricePanel(close=close, volume=pd.DataFrame(100.0, index=index, columns=close.columns))
-    settings = {**load_settings(), 'step1_ffill_limit_days': 5}
+    settings = {**step1_settings, 'step1_ffill_limit_days': 5}
     panel = F.build_feature_panel(prices, ['ret_21'], settings)
 
     price = panel.price['A.DE']
@@ -121,24 +153,27 @@ def test_a_day_without_a_trade_carries_the_last_row_for_at_most_the_ffill_limit(
     assert not panel.eligible['A.DE'].iloc[305:307].any()
 
 
-def test_eligibility_requires_features_traded_value_and_a_minimum_price(simulate_panel):
+def test_eligibility_requires_features_traded_value_and_a_price_above_the_minimum(
+        simulate_panel: PanelFactory, step1_settings: Settings) -> None:
     prices = simulate_panel(n_stocks=4, n_days=400, seed=1)
     close, volume = prices.close.copy(), prices.volume.copy()
-    close['S001.DE'] = 0.9                      # at or below step1_min_price_eur
-    volume['S002.DE'] = 0.0                     # no traded value
-    close.iloc[:200, 3] = np.nan                # listed later: features missing
-    settings = load_settings()
-    panel = F.build_feature_panel(PricePanel(close, volume), settings['step1_features'], settings)
+    close['S001.DE'] = step1_settings['step1_min_price_eur']  # exactly at the minimum: not eligible
+    volume['S002.DE'] = 0.0                                    # no traded value
+    close.iloc[:200, 3] = np.nan                               # listed later: features missing
+    panel = F.build_feature_panel(PricePanel(close, volume), step1_settings['step1_features'], step1_settings)
 
     last = panel.eligible.iloc[-1]
     assert last.to_dict() == {'S000.DE': True, 'S001.DE': False, 'S002.DE': False, 'S003.DE': False}
+    # The price is the only reason for S001.DE: its features and traded value are present
+    assert panel.traded_value['S001.DE'].iloc[-1] > 0
+    assert all(pd.notna(frame['S001.DE'].iloc[-1]) for frame in panel.features.values())
     # Eligible exactly once every feature is present
     first_full = panel.features['mom_12_1']['S000.DE'].first_valid_index()
     assert not panel.eligible['S000.DE'].loc[:first_full].iloc[:-1].any()
     assert panel.eligible['S000.DE'].loc[first_full]
 
 
-def test_rank_within_date_matches_pandas_pct_rank_on_the_eligible_set():
+def test_rank_within_date_matches_pandas_pct_rank_on_the_eligible_set() -> None:
     values = pd.DataFrame([[3.0, 1.0, 2.0, 2.0, 9.0], [1.0, np.nan, 5.0, 4.0, 0.0]],
                           index=pd.to_datetime(['2024-01-31', '2024-02-29']),
                           columns=['A', 'B', 'C', 'D', 'E'])
@@ -153,22 +188,22 @@ def test_rank_within_date_matches_pandas_pct_rank_on_the_eligible_set():
     assert ranks.loc['2024-01-31', 'A'] == pytest.approx(0.5)
 
 
-def test_month_end_dates_are_the_last_calendar_date_of_each_month():
+def test_month_end_dates_are_the_last_calendar_date_of_each_month() -> None:
     calendar = pd.to_datetime(['2024-01-30', '2024-01-31', '2024-02-27', '2024-02-28', '2024-03-01'])
     assert list(F.month_end_dates(calendar)) == list(pd.to_datetime(['2024-01-31', '2024-02-28', '2024-03-01']))
 
 
-def test_features_and_ranks_at_a_date_do_not_change_when_later_prices_are_removed(simulate_panel):
+def test_features_and_ranks_at_a_date_do_not_change_when_later_prices_are_removed(
+        simulate_panel: PanelFactory, step1_settings: Settings) -> None:
     prices = simulate_panel(n_stocks=12, n_days=700, drift_sd=0.001, seed=3)
-    settings = load_settings()
-    names = settings['step1_features']
+    names = step1_settings['step1_features']
     cut = prices.close.index[500]
     truncated = PricePanel(prices.close.loc[:cut], prices.volume.loc[:cut])
 
-    full_panel = F.build_feature_panel(prices, names, settings)
-    cut_panel = F.build_feature_panel(truncated, names, settings)
-    full = F.to_long_panel(full_panel, [cut], settings)
-    part = F.to_long_panel(cut_panel, [cut], settings)
+    full_panel = F.build_feature_panel(prices, names, step1_settings)
+    cut_panel = F.build_feature_panel(truncated, names, step1_settings)
+    full = F.to_long_panel(full_panel, [cut], step1_settings)
+    part = F.to_long_panel(cut_panel, [cut], step1_settings)
 
     columns = F.rank_columns(names) + names + ['price']
     pd.testing.assert_frame_equal(full[columns], part[columns])

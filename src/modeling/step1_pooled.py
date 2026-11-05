@@ -18,6 +18,7 @@ import logging
 import math
 import warnings
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
@@ -27,8 +28,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 
 from ..ingestion.market_api import PricePanel
-from ..processing.features import (FeaturePanel, build_feature_panel, month_end_dates, rank_columns,
-                                   to_long_panel, validate_feature_names)
+from ..processing.features import (RANK_PREFIX, FeaturePanel, build_feature_panel, month_end_dates,
+                                   rank_columns, to_long_panel, validate_feature_names)
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +40,14 @@ CI_PERCENTILES = (2.5, 97.5)        # two-sided 95% percentile interval of the b
 STATUS_OK = 'ok'
 STATUS_GATE_FAILED = 'model_gate_failed'
 NOT_ELIGIBLE = 'not_eligible'
-# Precedence of the reasons when several apply
+# Reasons why a stock is not ranked. When several apply, the first one in this order is
+# reported (not_eligible_reasons); the model summary lists the counts in the same order.
 INELIGIBLE_REASONS = ('stale_price', 'insufficient_history', 'price_at_or_below_min', 'no_traded_value')
 
 GATE_INSUFFICIENT_DATES = 'insufficient_validation_dates'
 GATE_LOW_AUC = 'auc_ci_lower_at_or_below_threshold'
 GATE_NO_TRAINING_ROWS = 'no_training_rows'
+GATE_SINGLE_CLASS_TRAINING = 'single_class_training'
 
 # Settings that define the model; copied into the model summary
 SUMMARY_PARAMETER_KEYS = (
@@ -78,6 +81,11 @@ def _mean(values: Sequence[float]) -> float:
     array = np.asarray(values, dtype=float)
     array = array[np.isfinite(array)]
     return float(array.mean()) if array.size else float('nan')
+
+
+def _feature_name(column: str) -> str:
+    """Returns the feature name of a rank column ('r_ret_21' -> 'ret_21')."""
+    return column[len(RANK_PREFIX):] if column.startswith(RANK_PREFIX) else column
 
 
 def fit_pooled_model(X: Any, y: Any, settings: Dict[str, Any]) -> LogisticRegression:
@@ -125,13 +133,13 @@ def per_date_auc(df: pd.DataFrame, prob_col: str, label_col: str, min_stocks: in
     """
     Computes the cross-sectional ROC AUC of every date.
 
-    Dates with fewer than `min_stocks` labelled rows or a single class are skipped.
+    Dates with fewer than `min_stocks` labeled rows or a single class are skipped.
 
     Args:
         df (pd.DataFrame): Rows indexed by (date, ticker).
         prob_col (str): Column with the predicted probabilities.
         label_col (str): Column with the 0/1 labels (NaN rows are ignored).
-        min_stocks (int): Minimum labelled rows of a date.
+        min_stocks (int): Minimum labeled rows of a date.
 
     Returns:
         pd.Series: AUC per date (sorted by date), only for the dates that qualify.
@@ -190,7 +198,11 @@ def block_bootstrap_ci(values: Sequence[float], block: int, replications: int, s
 
 def n_up_for(n_ranked: int, up_share: float) -> int:
     """
-    Number of UP stocks among `n_ranked` ranked stocks: max(1, floor(up_share * n + 0.5)).
+    Number of UP stocks among `n` ranked stocks: min(n, max(1, floor(up_share * n + 0.5))).
+
+    The product is computed in exact decimal arithmetic on the share as written in the
+    settings, so a binary floating-point error cannot round it down (0.35 * 90 + 0.5 is
+    32, while the float product 0.35 * 90 is 31.499999999999996).
 
     Args:
         n_ranked (int): Number of ranked stocks.
@@ -201,7 +213,8 @@ def n_up_for(n_ranked: int, up_share: float) -> int:
     """
     if n_ranked <= 0:
         return 0
-    return min(n_ranked, max(1, int(math.floor(up_share * n_ranked + 0.5))))
+    share = Fraction(str(up_share))
+    return min(n_ranked, max(1, math.floor(share * n_ranked + Fraction(1, 2))))
 
 
 def rank_by_probability(probability: pd.Series) -> pd.Series:
@@ -243,7 +256,9 @@ class ValidationResult:
     Result of the walk-forward validation.
 
     Attributes:
-        years (List[Dict[str, Any]]): One entry per test year (fitted or skipped with a status).
+        years (List[Dict[str, Any]]): One entry per test year (fitted or skipped with a
+            status); the coefficients of a fitted year are keyed by feature name, as in the
+            model summary.
         overall (Dict[str, Any]): Metrics over all test dates, including the bootstrap CI.
         per_date (pd.DataFrame): One row per test date (date, year, n, auc, n_top,
             top_hit_rate, base_rate, top_fwd, universe_fwd, top_minus_universe_fwd).
@@ -265,7 +280,7 @@ def _per_date_table(test: pd.DataFrame, year: int, up_share: float, min_stocks: 
         test (pd.DataFrame): Test rows indexed by (date, ticker) with y, fwd and probability.
         year (int): The test year.
         up_share (float): Top share used for the hit rate and the return spread.
-        min_stocks (int): Minimum labelled rows of a date for its AUC.
+        min_stocks (int): Minimum labeled rows of a date for its AUC.
 
     Returns:
         pd.DataFrame: One row per date with the PER_DATE_COLUMNS.
@@ -309,7 +324,8 @@ def walk_forward_validation(long_panel: pd.DataFrame, feature_cols: Sequence[str
         settings (Dict[str, Any]): Loaded settings.
 
     Returns:
-        ValidationResult: Per-year metrics, overall metrics with the bootstrap CI, and the per-date table.
+        ValidationResult: Per-year metrics (coefficients keyed by feature name), overall
+        metrics with the bootstrap CI, and the per-date table.
     """
     scoring_date = pd.Timestamp(scoring_date)
     history = pd.DateOffset(years=int(settings['step1_history_years']))
@@ -317,6 +333,7 @@ def walk_forward_validation(long_panel: pd.DataFrame, feature_cols: Sequence[str
     min_stocks = int(settings['step1_min_stocks_per_date'])
     n_years = int(settings['step1_validation_years'])
     cols = list(feature_cols)
+    names = [_feature_name(col) for col in cols]
 
     dates = pd.DatetimeIndex(long_panel.index.get_level_values('date'))
     label_end = long_panel['label_end'].to_numpy(dtype='datetime64[ns]')
@@ -373,7 +390,7 @@ def walk_forward_validation(long_panel: pd.DataFrame, feature_cols: Sequence[str
             'base_rate': _num(y_test.mean()),
             'top_minus_universe_fwd': _num(_mean(table['top_minus_universe_fwd'])),
             'intercept': _num(model.intercept_[0]),
-            'coefficients': {col: _num(coef) for col, coef in zip(cols, model.coef_[0])},
+            'coefficients': {name: _num(coef) for name, coef in zip(names, model.coef_[0])},
         })
         logger.info(f"Validation {year}: {years[-1]['n_train']} training rows, {years[-1]['n_test_dates']} test dates, "
                     f"mean per-date AUC {years[-1]['auc_mean']}")
@@ -468,7 +485,8 @@ def not_eligible_reasons(feature_panel: FeaturePanel, date: pd.Timestamp, min_pr
         min_price (float): `step1_min_price_eur`.
 
     Returns:
-        pd.Series: Reason per ticker (one of INELIGIBLE_REASONS), None for eligible stocks.
+        pd.Series: Reason per ticker (one of INELIGIBLE_REASONS; if several apply, the
+        first in that order), None for eligible stocks.
     """
     price = feature_panel.price.loc[date]
     traded_value = feature_panel.traded_value.loc[date]
@@ -476,16 +494,17 @@ def not_eligible_reasons(feature_panel: FeaturePanel, date: pd.Timestamp, min_pr
     for frame in feature_panel.features.values():
         missing |= frame.loc[date].isna()
     reasons = pd.Series(None, index=feature_panel.price.columns, dtype=object)
-    finite_tv = np.isfinite(traded_value.to_numpy(dtype=float))
-    checks = [
-        ('stale_price', price.isna().to_numpy()),
-        ('insufficient_history', missing.to_numpy()),
-        ('price_at_or_below_min', (price <= min_price).to_numpy()),
-        ('no_traded_value', ~(finite_tv & (np.nan_to_num(traded_value.to_numpy(dtype=float), nan=-1.0) > 0))),
-    ]
+    tv = traded_value.to_numpy(dtype=float)
+    masks = {
+        'stale_price': price.isna().to_numpy(),
+        'insufficient_history': missing.to_numpy(),
+        'price_at_or_below_min': (price <= min_price).to_numpy(),
+        'no_traded_value': ~(np.isfinite(tv) & (np.nan_to_num(tv, nan=-1.0) > 0)),
+    }
     eligible = feature_panel.eligible.loc[date].to_numpy()
-    for reason, mask in reversed(checks):  # earlier reasons take precedence
-        reasons[mask & ~eligible] = reason
+    # Assigned in reverse order, so the first applicable reason of INELIGIBLE_REASONS remains
+    for reason in reversed(INELIGIBLE_REASONS):
+        reasons[masks[reason] & ~eligible] = reason
     reasons[eligible] = None
     return reasons
 
@@ -522,6 +541,10 @@ def execute_step1_pooled(price_panel: PricePanel, settings: Dict[str, Any]) -> S
     Runs the pooled Step 1: features, month-end panel, walk-forward validation, gate,
     final fit and scoring of the last closed trading day.
 
+    If no final model can be fitted (no training rows, or a single class), the gate fails
+    with that reason and nothing is ranked: n_ranked and n_up are 0, and the eligible
+    stocks carry the status model_gate_failed with null scores.
+
     Args:
         price_panel (PricePanel): Closes and volumes of the universe.
         settings (Dict[str, Any]): Loaded settings.
@@ -552,10 +575,12 @@ def execute_step1_pooled(price_panel: PricePanel, settings: Dict[str, Any]) -> S
     train = (panel['y'].notna().to_numpy() & (label_end < np.datetime64(scoring_date))
              & np.asarray(dates < scoring_date) & np.asarray(dates >= scoring_date - history))
     model: Optional[LogisticRegression] = None
-    if train.any() and panel.loc[train, 'y'].nunique() > 1:
-        model = fit_pooled_model(panel.loc[train, cols], panel.loc[train, 'y'], settings)
-    else:
+    if not train.any():
         gate = {**gate, 'passed': False, 'reason': GATE_NO_TRAINING_ROWS}
+    elif panel.loc[train, 'y'].nunique() < 2:
+        gate = {**gate, 'passed': False, 'reason': GATE_SINGLE_CLASS_TRAINING}
+    else:
+        model = fit_pooled_model(panel.loc[train, cols], panel.loc[train, 'y'], settings)
     if gate['passed']:
         logger.info(f"Model gate passed: lower CI bound {gate['ci_lower']:.4f} > {gate['threshold']}.")
     else:
@@ -564,10 +589,12 @@ def execute_step1_pooled(price_panel: PricePanel, settings: Dict[str, Any]) -> S
     cross_section = to_long_panel(feature_panel, [scoring_date], settings).droplevel('date')
     if model is not None:
         scored = score_cross_section(model, cross_section, settings, gate['passed'])
+        n_ranked = int(len(cross_section))
     else:
+        # Without a final model no stock is scored or ranked; the eligible stocks keep null scores
         scored = pd.DataFrame(index=cross_section.index, columns=['probability', 'rank', 'top_percent'],
                               dtype=float).assign(predicted_class='NOT_UP')
-    n_ranked = int(len(cross_section))
+        n_ranked = 0
     n_up = n_up_for(n_ranked, up_share)
 
     tickers = feature_panel.tickers

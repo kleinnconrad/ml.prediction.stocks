@@ -1,7 +1,7 @@
 """
 Shared fixtures: synthetic price panels and fast Step 1 settings (offline, no network).
 """
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -12,11 +12,34 @@ from src.ingestion.market_api import PricePanel
 
 PanelFactory = Callable[..., PricePanel]
 
+# The ten default Step 1 features of release 3.0.0
+DEFAULT_STEP1_FEATURES: List[str] = ['ret_21', 'ret_63', 'ret_126', 'mom_12_1', 'dist_sma50', 'dist_sma200',
+                                     'vol_21', 'vol_126', 'log_traded_value', 'drawdown_252']
+
+# Parameters whose values the tests rely on. They are pinned here, so that changing them in
+# config/settings.yaml (where CLAUDE.md requires them to be changed) does not break the tests.
+PINNED_STEP1_SETTINGS: Dict[str, Any] = {
+    'horizon_days': 126,
+    'threshold': 0.10,
+    'step1_features': DEFAULT_STEP1_FEATURES,
+    'step1_l2_c': 0.1,
+    'step1_solver_tol': 1.0e-8,
+    'step1_max_iter': 1000,
+    'step1_up_share': 0.10,
+    'step1_min_price_eur': 1.0,
+    'step1_ffill_limit_days': 5,
+    'step1_bootstrap_block_months': 6,
+    'step1_bootstrap_seed': 0,
+    'step1_min_validation_auc_lower': 0.5,
+}
+
 
 @pytest.fixture
 def step1_settings() -> Dict[str, Any]:
-    """Production settings with a short history and few bootstrap replications."""
+    """Production settings with the pinned model parameters, a short history and few bootstrap replications."""
     settings = load_settings()
+    settings.update({key: list(value) if isinstance(value, list) else value
+                     for key, value in PINNED_STEP1_SETTINGS.items()})
     settings.update({
         'step1_history_years': 3,
         'step1_validation_years': 4,
