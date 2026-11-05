@@ -136,7 +136,7 @@ The target is unchanged: a stock is a positive case if its adjusted close 126 tr
 ### Why the Per-Stock Design Had to Be Replaced
 
 **1. The per-stock models were overfitted.**
-- On a sample of 30 stocks, the fold models fitted their training rows almost perfectly but had no skill on the validation folds (median in-sample AUC 0.967 against out-of-sample AUC 0.508; AUC 0.5 is chance).
+- On a sample of 30 stocks, the fold models fitted their training rows closely but had no skill on the validation folds (median in-sample AUC 0.967 against out-of-sample AUC 0.508; AUC 0.5 is chance).
 - In a control run the macro features were shifted in time, so that they carried no information about the target. The models fitted that noise equally well (in-sample AUC 0.943) and validated the same (out-of-sample difference -0.018, p = 0.53).
 - Twelve pure calendar functions reproduced most of the training fit (in-sample AUC 0.948). The macro features worked as a clock that recognized the market phases of the training period.
 
@@ -294,7 +294,7 @@ The selection step was repeated in every validation year, so the results include
 
 **Why selection adds nothing here:**
 - **The extra candidates fit only noise.** Using all 53 without selection gave exactly the AUC of the 10 fixed features, while the in-sample AUC rose from 0.566 to 0.586.
-- **Stepwise selection picks noise.** A permutation test showed that the honest forward selection adds one or two pure-noise features in every year. Its optimism on noise equals its optimism on the real data. Only its first pick (the distance to the 52-week low) stood clearly above noise.
+- **Stepwise selection picks noise.** A permutation test showed that the honest forward selection adds one or two pure-noise features in every year. Its optimism on noise equals its optimism on the real data. Only its first pick (the distance to the 52-week low) was above the noise range.
   - A stricter stopping rule stops after that single feature. A looser one moves toward the dense model.
 - **The selected sets are unstable.** The share of features that two consecutive years have in common (Jaccard) was 0.25 for the earlier production-style procedure and 0.47 for the honest stepwise selection.
 - **Macro candidates destroy the ranking.** With them in the candidate set, ANOVA and stepwise selection chose only macro features, in every year. Macro values are the same for every stock on a date, so the cross-sectional ranking fell to chance (0.500).
