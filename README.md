@@ -700,13 +700,13 @@ Release Please is triggered automatically via GitHub Actions whenever code is pu
 
 When a `feat:` or `fix:` commit is pushed to `main`, the bot opens a **Release Pull Request**. Once that PR is merged, the release is published and tagged, and the `CHANGELOG.md` and the version in `pyproject.toml` are updated on the `main` branch.
 
-### Update uv.lock before merging a Release Pull Request
-Release Please changes the version in `pyproject.toml` but not in `uv.lock`, which records the project's own version. Every workflow runs `uv run --locked`, so a release merged without a new `uv.lock` breaks CI and the next scheduled pipeline run. Before merging a Release Pull Request:
-1. Check out its branch, run `uv lock` (only the `stock-predictor` version line changes) and check the result with `uv lock --check`.
-2. Commit `uv.lock` as `chore: update uv.lock` and push it to the branch of the Release Pull Request.
-3. Merge once the `CI passed` check succeeds. If Release Please updates the pull request again, repeat steps 1 and 2.
+### uv.lock on the Release Pull Request
+Release Please changes the version in `pyproject.toml` but not in `uv.lock`, which records the project's own version. Every workflow runs `uv run --locked`, so a release merged with a stale `uv.lock` would break CI and the next scheduled pipeline run. The `release-please` workflow therefore updates the lock file itself:
+1. After the release steps, if Release Please created or updated a Release Pull Request (action outputs `prs_created` and `pr`), the workflow checks out the pull request's branch.
+2. It runs `uv lock` and, if `uv.lock` changed, commits it as `chore: update uv.lock for the release` (as `github-actions[bot]`) and pushes it to that branch.
+3. Release Please rewrites (force-pushes) its branch only when it updates the pull request, that is, when a new releasable commit changes the release notes. That happens in a run of this workflow, and the same run adds the lock commit again. Runs of the workflow do not overlap (`concurrency`), so a later run cannot rewrite the branch while an earlier one pushes its lock commit.
 
-If a release was merged without this step, run `uv lock` on a branch from `main` and merge that commit before the next scheduled run of `2. Execute Pipeline (Step 1 & 2)`.
+These steps run after the release and the disclaimer steps, so a failure in them cannot affect a release. The lock commit is pushed with the workflow's `GITHUB_TOKEN`, which does not start the `CI` workflow; to run the checks on the Release Pull Request before merging, close and reopen it. Pushes to `main` with the `GITHUB_TOKEN`, such as the data commits of the pipeline and of the variable review, do not start this workflow either. If a release was ever merged with a stale lock file, run `uv lock` on a branch from `main` and merge that commit before the next scheduled run of `2. Execute Pipeline (Step 1 & 2)`.
 
 ---
 
