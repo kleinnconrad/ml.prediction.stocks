@@ -2,7 +2,7 @@
 [![1. T7 Download (Initialization)](https://github.com/kleinnconrad/ml.prediction.stocks/actions/workflows/01_t7_download.yml/badge.svg?branch=main)](https://github.com/kleinnconrad/ml.prediction.stocks/actions/workflows/01_t7_download.yml)
 [![2. Execute Pipeline (Step 1 & 2)](https://github.com/kleinnconrad/ml.prediction.stocks/actions/workflows/02_run_pipeline.yml/badge.svg?branch=main)](https://github.com/kleinnconrad/ml.prediction.stocks/actions/workflows/02_run_pipeline.yml)
 [![CI](https://github.com/kleinnconrad/ml.prediction.stocks/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kleinnconrad/ml.prediction.stocks/actions/workflows/ci.yml)
-![Fundamentals Last Updated](https://img.shields.io/badge/Fundamentals_Last_Updated-2026--11--02-blue)
+![Fundamentals Last Updated](https://img.shields.io/badge/Fundamentals_Last_Updated-2026--11--24-blue)
 ## Table of Contents
 - [How the Engine Works](#how-the-engine-works)
 - [Paradigm Change in 3.0.0: From Per-Stock Models to One Pooled Model](#paradigm-change-in-300-from-per-stock-models-to-one-pooled-model)
